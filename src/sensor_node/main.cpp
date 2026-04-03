@@ -32,6 +32,10 @@ static constexpr int PIN_RS485_EN = 18;
 static constexpr uint32_t ACCEL_SAMPLE_INTERVAL_MS = 10; // 100 Hz
 static constexpr size_t RMS_WINDOW_SIZE = 100;           // 1 second window at 100 Hz
 
+static constexpr uint32_t PIEZO_SAMPLE_INTERVAL_MS = 10; // 100 Hz
+static constexpr float PIEZO_BASELINE_ALPHA = 0.01f;     // slow baseline tracking
+static constexpr uint16_t PIEZO_PEAK_DECAY_STEP = 10;    // peak hold decay per sample
+
 // ============================================================
 // STATUS ENUM
 // ============================================================
@@ -65,6 +69,11 @@ struct PiezoData
     uint16_t peak_adc;
     uint16_t level_adc;
     uint32_t spike_count;
+
+    float baseline_adc;
+    bool spike_armed;
+    uint16_t warning_events;
+    uint16_t fault_events;
 };
 
 struct ThresholdConfig
@@ -128,7 +137,16 @@ HardwareSerial rs485Serial(2);
 // GLOBAL STATE
 // ============================================================
 VibrationData vibration = {};
-PiezoData piezo = {};
+PiezoData piezo = {
+    0,    // raw_adc
+    0,    // peak_adc
+    0,    // level_adc
+    0,    // spike_count
+    0.0f, // baseline_adc
+    true, // spike_armed
+    0,    // warning_events
+    0     // fault_events
+};
 ThresholdConfig config = {
     15.0f,
     30.0f,
@@ -358,12 +376,49 @@ void samplePiezo()
     uint16_t raw = analogRead(PIN_PIEZO_ADC);
     piezo.raw_adc = raw;
 
-    if (raw > piezo.peak_adc)
+    if (piezo.baseline_adc == 0.0f)
     {
-        piezo.peak_adc = raw;
+        piezo.baseline_adc = static_cast<float>(raw);
+    }
+    else
+    {
+        piezo.baseline_adc =
+            (1.0f - PIEZO_BASELINE_ALPHA) * piezo.baseline_adc +
+            PIEZO_BASELINE_ALPHA * static_cast<float>(raw);
     }
 
-    piezo.level_adc = raw;
+    uint16_t level = static_cast<uint16_t>(fabsf(static_cast<float>(raw) - piezo.baseline_adc));
+    piezo.level_adc = level;
+
+    if (level > piezo.peak_adc)
+    {
+        piezo.peak_adc = level;
+    }
+    else if (piezo.peak_adc > PIEZO_PEAK_DECAY_STEP)
+    {
+        piezo.peak_adc -= PIEZO_PEAK_DECAY_STEP;
+    }
+    else
+    {
+        piezo.peak_adc = 0;
+    }
+
+    if (piezo.spike_armed && level >= config.piezo_warning)
+    {
+        piezo.spike_count++;
+        piezo.warning_events++;
+        piezo.spike_armed = false;
+    }
+
+    if (level >= config.piezo_fault)
+    {
+        piezo.fault_events++;
+    }
+
+    if (level < (config.piezo_warning / 2))
+    {
+        piezo.spike_armed = true;
+    }
 }
 
 void printNodeStatus()
@@ -377,11 +432,15 @@ void printNodeStatus()
     Serial.printf("Accel RMS [g] -> X: %.4f, Y: %.4f, Z: %.4f, Overall: %.4f\n",
                   vibration.x_rms_g, vibration.y_rms_g, vibration.z_rms_g, vibration.overall_rms_g);
     Serial.printf("BDU: %.2f\n", vibration.bdu);
-    Serial.printf("Piezo -> Raw: %u, Peak: %u, Level: %u, Count: %lu\n",
+    Serial.printf("Piezo -> Raw: %u, Baseline: %.1f, Level: %u, Peak: %u, Spike Count: %lu\n",
                   piezo.raw_adc,
-                  piezo.peak_adc,
+                  piezo.baseline_adc,
                   piezo.level_adc,
+                  piezo.peak_adc,
                   static_cast<unsigned long>(piezo.spike_count));
+    Serial.printf("Piezo Events -> Warning: %u, Fault: %u\n",
+                  piezo.warning_events,
+                  piezo.fault_events);
     Serial.printf("Thresholds -> Warn BDU: %.1f, Fault BDU: %.1f, Piezo Warn: %u, Piezo Fault: %u\n",
                   config.warning_bdu,
                   config.fault_bdu,
@@ -403,7 +462,7 @@ void setup()
 
     Serial.println();
     Serial.println("Motor Vibration Monitor - Sensor Node Boot");
-    Serial.println("Commit 3: RMS and BDU processing");
+    Serial.println("Commit 4: piezo impact and spike detection");
 
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
@@ -451,7 +510,7 @@ void loop()
         runtimeState.uptime_seconds++;
     }
 
-    if (now - lastPiezoSampleMs >= 50)
+    if (now - lastPiezoSampleMs >= PIEZO_SAMPLE_INTERVAL_MS)
     {
         lastPiezoSampleMs = now;
         samplePiezo();
