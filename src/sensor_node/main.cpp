@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <math.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <Adafruit_NeoPixel.h>
@@ -21,9 +22,15 @@ static constexpr int PIN_PIEZO_ADC = 34;
 static constexpr int PIN_WS2812 = 4;
 static constexpr int WS2812_COUNT = 1;
 
-static constexpr int PIN_RS485_RX = 16; // MAX485 RO
-static constexpr int PIN_RS485_TX = 17; // MAX485 DI
-static constexpr int PIN_RS485_EN = 18; // MAX485 DE and RE tied together
+static constexpr int PIN_RS485_RX = 16;
+static constexpr int PIN_RS485_TX = 17;
+static constexpr int PIN_RS485_EN = 18;
+
+// ============================================================
+// SAMPLING CONFIGURATION
+// ============================================================
+static constexpr uint32_t ACCEL_SAMPLE_INTERVAL_MS = 10; // 100 Hz
+static constexpr size_t RMS_WINDOW_SIZE = 100;           // 1 second window at 100 Hz
 
 // ============================================================
 // STATUS ENUM
@@ -81,7 +88,6 @@ struct NodeRuntime
 
 struct ModbusRegisters
 {
-    // Input registers (telemetry style)
     uint16_t node_id;
     uint16_t status;
     uint16_t x_rms_mg;
@@ -95,7 +101,6 @@ struct ModbusRegisters
     uint16_t error_flags;
     uint16_t uptime_seconds_lo;
 
-    // Holding register style config mirror
     uint16_t warning_bdu_x10;
     uint16_t fault_bdu_x10;
     uint16_t piezo_warn_threshold;
@@ -103,13 +108,20 @@ struct ModbusRegisters
     uint16_t led_enable;
 };
 
+struct SampleWindow
+{
+    float x[RMS_WINDOW_SIZE];
+    float y[RMS_WINDOW_SIZE];
+    float z[RMS_WINDOW_SIZE];
+    size_t index;
+    bool filled;
+};
+
 // ============================================================
 // GLOBAL OBJECTS
 // ============================================================
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
 Adafruit_NeoPixel pixel(WS2812_COUNT, PIN_WS2812, NEO_GRB + NEO_KHZ800);
-
-// Use HardwareSerial port 2 for RS-485
 HardwareSerial rs485Serial(2);
 
 // ============================================================
@@ -118,24 +130,24 @@ HardwareSerial rs485Serial(2);
 VibrationData vibration = {};
 PiezoData piezo = {};
 ThresholdConfig config = {
-    15.0f, // warning_bdu
-    30.0f, // fault_bdu
-    1200,  // piezo_warning
-    2200,  // piezo_fault
-    true   // led_enabled
-};
+    15.0f,
+    30.0f,
+    1200,
+    2200,
+    true};
 NodeRuntime runtimeState = {
-    STATUS_NORMAL, // status
-    0,             // error_flags
-    0,             // uptime_seconds
-    false          // adxl_ok
-};
+    STATUS_NORMAL,
+    0,
+    0,
+    false};
 ModbusRegisters regs = {};
+SampleWindow sampleWindow = {{0}, {0}, {0}, 0, false};
 
 // Timing
 uint32_t lastStatusPrintMs = 0;
 uint32_t lastPiezoSampleMs = 0;
 uint32_t lastUptimeMs = 0;
+uint32_t lastAccelSampleMs = 0;
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -143,11 +155,6 @@ uint32_t lastUptimeMs = 0;
 void setRs485ReceiveMode()
 {
     digitalWrite(PIN_RS485_EN, LOW);
-}
-
-void setRs485TransmitMode()
-{
-    digitalWrite(PIN_RS485_EN, HIGH);
 }
 
 void setPixelColor(uint8_t r, uint8_t g, uint8_t b)
@@ -244,23 +251,106 @@ bool initADXL345()
     return true;
 }
 
-void readAccelerometerSnapshot()
+void readAccelerometerInstant(float &xg, float &yg, float &zg)
 {
     if (!runtimeState.adxl_ok)
     {
-        vibration.x_g = 0.0f;
-        vibration.y_g = 0.0f;
-        vibration.z_g = 0.0f;
+        xg = 0.0f;
+        yg = 0.0f;
+        zg = 0.0f;
         return;
     }
 
     sensors_event_t event;
     accel.getEvent(&event);
 
-    // Convert from m/s^2 to g
-    vibration.x_g = event.acceleration.x / 9.80665f;
-    vibration.y_g = event.acceleration.y / 9.80665f;
-    vibration.z_g = event.acceleration.z / 9.80665f;
+    xg = event.acceleration.x / 9.80665f;
+    yg = event.acceleration.y / 9.80665f;
+    zg = event.acceleration.z / 9.80665f;
+}
+
+void addAccelSample(float xg, float yg, float zg)
+{
+    sampleWindow.x[sampleWindow.index] = xg;
+    sampleWindow.y[sampleWindow.index] = yg;
+    sampleWindow.z[sampleWindow.index] = zg;
+
+    sampleWindow.index++;
+    if (sampleWindow.index >= RMS_WINDOW_SIZE)
+    {
+        sampleWindow.index = 0;
+        sampleWindow.filled = true;
+    }
+
+    vibration.x_g = xg;
+    vibration.y_g = yg;
+    vibration.z_g = zg;
+}
+
+size_t getWindowCount()
+{
+    return sampleWindow.filled ? RMS_WINDOW_SIZE : sampleWindow.index;
+}
+
+float computeMean(const float *buffer, size_t count)
+{
+    if (count == 0)
+    {
+        return 0.0f;
+    }
+
+    float sum = 0.0f;
+    for (size_t i = 0; i < count; i++)
+    {
+        sum += buffer[i];
+    }
+    return sum / static_cast<float>(count);
+}
+
+float computeDynamicRms(const float *buffer, size_t count, float mean)
+{
+    if (count == 0)
+    {
+        return 0.0f;
+    }
+
+    float sumSq = 0.0f;
+    for (size_t i = 0; i < count; i++)
+    {
+        float dynamicValue = buffer[i] - mean;
+        sumSq += dynamicValue * dynamicValue;
+    }
+
+    return sqrtf(sumSq / static_cast<float>(count));
+}
+
+void updateVibrationMetrics()
+{
+    size_t count = getWindowCount();
+    if (count == 0)
+    {
+        vibration.x_rms_g = 0.0f;
+        vibration.y_rms_g = 0.0f;
+        vibration.z_rms_g = 0.0f;
+        vibration.overall_rms_g = 0.0f;
+        vibration.bdu = 0.0f;
+        return;
+    }
+
+    float meanX = computeMean(sampleWindow.x, count);
+    float meanY = computeMean(sampleWindow.y, count);
+    float meanZ = computeMean(sampleWindow.z, count);
+
+    vibration.x_rms_g = computeDynamicRms(sampleWindow.x, count, meanX);
+    vibration.y_rms_g = computeDynamicRms(sampleWindow.y, count, meanY);
+    vibration.z_rms_g = computeDynamicRms(sampleWindow.z, count, meanZ);
+
+    vibration.overall_rms_g = sqrtf(
+        (vibration.x_rms_g * vibration.x_rms_g) +
+        (vibration.y_rms_g * vibration.y_rms_g) +
+        (vibration.z_rms_g * vibration.z_rms_g));
+
+    vibration.bdu = vibration.overall_rms_g * 100.0f;
 }
 
 void samplePiezo()
@@ -282,8 +372,11 @@ void printNodeStatus()
     Serial.printf("Node ID: %u\n", NODE_ID);
     Serial.printf("Modbus Address: %u\n", MODBUS_ADDRESS);
     Serial.printf("ADXL345 OK: %s\n", runtimeState.adxl_ok ? "YES" : "NO");
-    Serial.printf("Accel Snapshot [g] -> X: %.4f, Y: %.4f, Z: %.4f\n",
+    Serial.printf("Accel Instant [g] -> X: %.4f, Y: %.4f, Z: %.4f\n",
                   vibration.x_g, vibration.y_g, vibration.z_g);
+    Serial.printf("Accel RMS [g] -> X: %.4f, Y: %.4f, Z: %.4f, Overall: %.4f\n",
+                  vibration.x_rms_g, vibration.y_rms_g, vibration.z_rms_g, vibration.overall_rms_g);
+    Serial.printf("BDU: %.2f\n", vibration.bdu);
     Serial.printf("Piezo -> Raw: %u, Peak: %u, Level: %u, Count: %lu\n",
                   piezo.raw_adc,
                   piezo.peak_adc,
@@ -310,30 +403,23 @@ void setup()
 
     Serial.println();
     Serial.println("Motor Vibration Monitor - Sensor Node Boot");
-    Serial.println("Commit 2: firmware skeleton");
+    Serial.println("Commit 3: RMS and BDU processing");
 
-    // I2C
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
-    // Piezo ADC input
     pinMode(PIN_PIEZO_ADC, INPUT);
 
-    // WS2812
     pixel.begin();
     pixel.clear();
     pixel.show();
 
-    // RS-485 control
     pinMode(PIN_RS485_EN, OUTPUT);
     setRs485ReceiveMode();
 
-    // RS-485 UART2
     rs485Serial.begin(9600, SERIAL_8N1, PIN_RS485_RX, PIN_RS485_TX);
 
-    // Initialize register mirror
     initRegisters();
 
-    // Bring sensor online
     bool adxlReady = initADXL345();
     if (adxlReady)
     {
@@ -359,27 +445,33 @@ void loop()
 {
     uint32_t now = millis();
 
-    // Update uptime every second
     if (now - lastUptimeMs >= 1000)
     {
         lastUptimeMs = now;
         runtimeState.uptime_seconds++;
     }
 
-    // Piezo sample every 50 ms for basic bring-up
     if (now - lastPiezoSampleMs >= 50)
     {
         lastPiezoSampleMs = now;
         samplePiezo();
     }
 
-    // Read accel snapshot before RMS math commit
-    readAccelerometerSnapshot();
+    if (now - lastAccelSampleMs >= ACCEL_SAMPLE_INTERVAL_MS)
+    {
+        lastAccelSampleMs = now;
 
-    // Sync Modbus-facing register mirror
+        float xg = 0.0f;
+        float yg = 0.0f;
+        float zg = 0.0f;
+
+        readAccelerometerInstant(xg, yg, zg);
+        addAccelSample(xg, yg, zg);
+        updateVibrationMetrics();
+    }
+
     syncRegistersFromState();
 
-    // Print every second
     if (now - lastStatusPrintMs >= 1000)
     {
         lastStatusPrintMs = now;
