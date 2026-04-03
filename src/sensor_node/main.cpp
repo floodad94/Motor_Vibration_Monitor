@@ -4,6 +4,7 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <Adafruit_NeoPixel.h>
+#include <ModbusRTU.h>
 
 // ============================================================
 // NODE CONFIGURATION
@@ -33,8 +34,42 @@ static constexpr uint32_t ACCEL_SAMPLE_INTERVAL_MS = 10; // 100 Hz
 static constexpr size_t RMS_WINDOW_SIZE = 100;           // 1 second window at 100 Hz
 
 static constexpr uint32_t PIEZO_SAMPLE_INTERVAL_MS = 10; // 100 Hz
-static constexpr float PIEZO_BASELINE_ALPHA = 0.01f;     // slow baseline tracking
-static constexpr uint16_t PIEZO_PEAK_DECAY_STEP = 10;    // peak hold decay per sample
+static constexpr float PIEZO_BASELINE_ALPHA = 0.01f;
+static constexpr uint16_t PIEZO_PEAK_DECAY_STEP = 10;
+
+// ============================================================
+// MODBUS REGISTER OFFSETS
+// These are 0-based offsets inside the Modbus library.
+// We document them as 30001/40001 in docs, but internally we
+// map them as 0,1,2... within each register space.
+// ============================================================
+enum InputRegisterOffset : uint16_t
+{
+    IR_NODE_ID = 0,
+    IR_STATUS,
+    IR_X_RMS_MG,
+    IR_Y_RMS_MG,
+    IR_Z_RMS_MG,
+    IR_OVERALL_RMS_MG,
+    IR_BDU_X10,
+    IR_PIEZO_PEAK,
+    IR_PIEZO_LEVEL,
+    IR_SPIKE_COUNT_LO,
+    IR_ERROR_FLAGS,
+    IR_UPTIME_SECONDS_LO,
+    IR_COUNT
+};
+
+enum HoldingRegisterOffset : uint16_t
+{
+    HR_WARNING_BDU_X10 = 0,
+    HR_FAULT_BDU_X10,
+    HR_PIEZO_WARN_THRESHOLD,
+    HR_PIEZO_FAULT_THRESHOLD,
+    HR_LED_ENABLE,
+    HR_RESERVED_1,
+    HR_COUNT
+};
 
 // ============================================================
 // STATUS ENUM
@@ -95,28 +130,6 @@ struct NodeRuntime
     bool adxl_ok;
 };
 
-struct ModbusRegisters
-{
-    uint16_t node_id;
-    uint16_t status;
-    uint16_t x_rms_mg;
-    uint16_t y_rms_mg;
-    uint16_t z_rms_mg;
-    uint16_t overall_rms_mg;
-    uint16_t bdu_x10;
-    uint16_t piezo_peak;
-    uint16_t piezo_level;
-    uint16_t spike_count_lo;
-    uint16_t error_flags;
-    uint16_t uptime_seconds_lo;
-
-    uint16_t warning_bdu_x10;
-    uint16_t fault_bdu_x10;
-    uint16_t piezo_warn_threshold;
-    uint16_t piezo_fault_threshold;
-    uint16_t led_enable;
-};
-
 struct SampleWindow
 {
     float x[RMS_WINDOW_SIZE];
@@ -132,34 +145,38 @@ struct SampleWindow
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
 Adafruit_NeoPixel pixel(WS2812_COUNT, PIN_WS2812, NEO_GRB + NEO_KHZ800);
 HardwareSerial rs485Serial(2);
+ModbusRTU mb;
 
 // ============================================================
 // GLOBAL STATE
 // ============================================================
 VibrationData vibration = {};
 PiezoData piezo = {
-    0,    // raw_adc
-    0,    // peak_adc
-    0,    // level_adc
-    0,    // spike_count
-    0.0f, // baseline_adc
-    true, // spike_armed
-    0,    // warning_events
-    0     // fault_events
-};
+    0,
+    0,
+    0,
+    0,
+    0.0f,
+    true,
+    0,
+    0};
 ThresholdConfig config = {
-    15.0f,
-    30.0f,
-    1200,
-    2200,
-    true};
+    15.0f, // warning_bdu
+    30.0f, // fault_bdu
+    1200,  // piezo_warning
+    2200,  // piezo_fault
+    true   // led_enabled
+};
 NodeRuntime runtimeState = {
     STATUS_NORMAL,
     0,
     0,
     false};
-ModbusRegisters regs = {};
 SampleWindow sampleWindow = {{0}, {0}, {0}, 0, false};
+
+// Modbus register storage
+uint16_t inputRegs[IR_COUNT] = {0};
+uint16_t holdingRegs[HR_COUNT] = {0};
 
 // Timing
 uint32_t lastStatusPrintMs = 0;
@@ -173,6 +190,11 @@ uint32_t lastAccelSampleMs = 0;
 void setRs485ReceiveMode()
 {
     digitalWrite(PIN_RS485_EN, LOW);
+}
+
+void setRs485TransmitMode()
+{
+    digitalWrite(PIN_RS485_EN, HIGH);
 }
 
 void setPixelColor(uint8_t r, uint8_t g, uint8_t b)
@@ -193,65 +215,18 @@ void updateStatusLed()
     switch (runtimeState.status)
     {
     case STATUS_NORMAL:
-        setPixelColor(0, 50, 0);
+        setPixelColor(0, 60, 0);
         break;
     case STATUS_WARNING:
-        setPixelColor(80, 35, 0);
+        setPixelColor(100, 45, 0);
         break;
     case STATUS_FAULT:
-        setPixelColor(80, 0, 0);
+        setPixelColor(100, 0, 0);
         break;
     default:
-        setPixelColor(0, 0, 40);
+        setPixelColor(0, 0, 60);
         break;
     }
-}
-
-void initRegisters()
-{
-    regs.node_id = NODE_ID;
-    regs.status = static_cast<uint16_t>(runtimeState.status);
-    regs.x_rms_mg = 0;
-    regs.y_rms_mg = 0;
-    regs.z_rms_mg = 0;
-    regs.overall_rms_mg = 0;
-    regs.bdu_x10 = 0;
-    regs.piezo_peak = 0;
-    regs.piezo_level = 0;
-    regs.spike_count_lo = 0;
-    regs.error_flags = 0;
-    regs.uptime_seconds_lo = 0;
-
-    regs.warning_bdu_x10 = static_cast<uint16_t>(config.warning_bdu * 10.0f);
-    regs.fault_bdu_x10 = static_cast<uint16_t>(config.fault_bdu * 10.0f);
-    regs.piezo_warn_threshold = config.piezo_warning;
-    regs.piezo_fault_threshold = config.piezo_fault;
-    regs.led_enable = config.led_enabled ? 1 : 0;
-}
-
-void syncRegistersFromState()
-{
-    regs.node_id = NODE_ID;
-    regs.status = static_cast<uint16_t>(runtimeState.status);
-
-    regs.x_rms_mg = static_cast<uint16_t>(vibration.x_rms_g * 1000.0f);
-    regs.y_rms_mg = static_cast<uint16_t>(vibration.y_rms_g * 1000.0f);
-    regs.z_rms_mg = static_cast<uint16_t>(vibration.z_rms_g * 1000.0f);
-    regs.overall_rms_mg = static_cast<uint16_t>(vibration.overall_rms_g * 1000.0f);
-    regs.bdu_x10 = static_cast<uint16_t>(vibration.bdu * 10.0f);
-
-    regs.piezo_peak = piezo.peak_adc;
-    regs.piezo_level = piezo.level_adc;
-    regs.spike_count_lo = static_cast<uint16_t>(piezo.spike_count & 0xFFFF);
-
-    regs.error_flags = runtimeState.error_flags;
-    regs.uptime_seconds_lo = static_cast<uint16_t>(runtimeState.uptime_seconds & 0xFFFF);
-
-    regs.warning_bdu_x10 = static_cast<uint16_t>(config.warning_bdu * 10.0f);
-    regs.fault_bdu_x10 = static_cast<uint16_t>(config.fault_bdu * 10.0f);
-    regs.piezo_warn_threshold = config.piezo_warning;
-    regs.piezo_fault_threshold = config.piezo_fault;
-    regs.led_enable = config.led_enabled ? 1 : 0;
 }
 
 bool initADXL345()
@@ -421,6 +396,114 @@ void samplePiezo()
     }
 }
 
+void updateNodeStatus()
+{
+    bool vibrationFault = (vibration.bdu >= config.fault_bdu);
+    bool vibrationWarning = (vibration.bdu >= config.warning_bdu);
+
+    bool piezoFault = (piezo.level_adc >= config.piezo_fault);
+    bool piezoWarning = (piezo.level_adc >= config.piezo_warning);
+
+    if (!runtimeState.adxl_ok)
+    {
+        runtimeState.status = STATUS_FAULT;
+    }
+    else if (vibrationFault || piezoFault)
+    {
+        runtimeState.status = STATUS_FAULT;
+    }
+    else if (vibrationWarning || piezoWarning)
+    {
+        runtimeState.status = STATUS_WARNING;
+    }
+    else
+    {
+        runtimeState.status = STATUS_NORMAL;
+    }
+}
+
+void updateInputRegisters()
+{
+    inputRegs[IR_NODE_ID] = NODE_ID;
+    inputRegs[IR_STATUS] = static_cast<uint16_t>(runtimeState.status);
+
+    inputRegs[IR_X_RMS_MG] = static_cast<uint16_t>(vibration.x_rms_g * 1000.0f);
+    inputRegs[IR_Y_RMS_MG] = static_cast<uint16_t>(vibration.y_rms_g * 1000.0f);
+    inputRegs[IR_Z_RMS_MG] = static_cast<uint16_t>(vibration.z_rms_g * 1000.0f);
+    inputRegs[IR_OVERALL_RMS_MG] = static_cast<uint16_t>(vibration.overall_rms_g * 1000.0f);
+    inputRegs[IR_BDU_X10] = static_cast<uint16_t>(vibration.bdu * 10.0f);
+
+    inputRegs[IR_PIEZO_PEAK] = piezo.peak_adc;
+    inputRegs[IR_PIEZO_LEVEL] = piezo.level_adc;
+    inputRegs[IR_SPIKE_COUNT_LO] = static_cast<uint16_t>(piezo.spike_count & 0xFFFF);
+    inputRegs[IR_ERROR_FLAGS] = runtimeState.error_flags;
+    inputRegs[IR_UPTIME_SECONDS_LO] = static_cast<uint16_t>(runtimeState.uptime_seconds & 0xFFFF);
+}
+
+void updateHoldingRegistersFromConfig()
+{
+    holdingRegs[HR_WARNING_BDU_X10] = static_cast<uint16_t>(config.warning_bdu * 10.0f);
+    holdingRegs[HR_FAULT_BDU_X10] = static_cast<uint16_t>(config.fault_bdu * 10.0f);
+    holdingRegs[HR_PIEZO_WARN_THRESHOLD] = config.piezo_warning;
+    holdingRegs[HR_PIEZO_FAULT_THRESHOLD] = config.piezo_fault;
+    holdingRegs[HR_LED_ENABLE] = config.led_enabled ? 1 : 0;
+    holdingRegs[HR_RESERVED_1] = 0;
+}
+
+void loadConfigFromHoldingRegisters()
+{
+    config.warning_bdu = static_cast<float>(holdingRegs[HR_WARNING_BDU_X10]) / 10.0f;
+    config.fault_bdu = static_cast<float>(holdingRegs[HR_FAULT_BDU_X10]) / 10.0f;
+    config.piezo_warning = holdingRegs[HR_PIEZO_WARN_THRESHOLD];
+    config.piezo_fault = holdingRegs[HR_PIEZO_FAULT_THRESHOLD];
+    config.led_enabled = (holdingRegs[HR_LED_ENABLE] != 0);
+
+    if (config.fault_bdu < config.warning_bdu)
+    {
+        config.fault_bdu = config.warning_bdu;
+        holdingRegs[HR_FAULT_BDU_X10] = holdingRegs[HR_WARNING_BDU_X10];
+    }
+
+    if (config.piezo_fault < config.piezo_warning)
+    {
+        config.piezo_fault = config.piezo_warning;
+        holdingRegs[HR_PIEZO_FAULT_THRESHOLD] = holdingRegs[HR_PIEZO_WARN_THRESHOLD];
+    }
+}
+
+void setupModbusRegisters()
+{
+    updateInputRegisters();
+    updateHoldingRegistersFromConfig();
+
+    for (uint16_t i = 0; i < IR_COUNT; i++)
+    {
+        mb.addIreg(i, inputRegs[i]);
+    }
+
+    for (uint16_t i = 0; i < HR_COUNT; i++)
+    {
+        mb.addHreg(i, holdingRegs[i]);
+    }
+}
+
+void syncModbusRegisters()
+{
+    updateInputRegisters();
+
+    for (uint16_t i = 0; i < IR_COUNT; i++)
+    {
+        mb.Ireg(i, inputRegs[i]);
+    }
+
+    for (uint16_t i = 0; i < HR_COUNT; i++)
+    {
+        holdingRegs[i] = mb.Hreg(i);
+    }
+
+    loadConfigFromHoldingRegisters();
+}
+
 void printNodeStatus()
 {
     Serial.println("--------------------------------------------------");
@@ -438,9 +521,6 @@ void printNodeStatus()
                   piezo.level_adc,
                   piezo.peak_adc,
                   static_cast<unsigned long>(piezo.spike_count));
-    Serial.printf("Piezo Events -> Warning: %u, Fault: %u\n",
-                  piezo.warning_events,
-                  piezo.fault_events);
     Serial.printf("Thresholds -> Warn BDU: %.1f, Fault BDU: %.1f, Piezo Warn: %u, Piezo Fault: %u\n",
                   config.warning_bdu,
                   config.fault_bdu,
@@ -462,10 +542,9 @@ void setup()
 
     Serial.println();
     Serial.println("Motor Vibration Monitor - Sensor Node Boot");
-    Serial.println("Commit 4: piezo impact and spike detection");
+    Serial.println("Commit 5: status logic, LED, and Modbus RTU slave");
 
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-
     pinMode(PIN_PIEZO_ADC, INPUT);
 
     pixel.begin();
@@ -477,24 +556,24 @@ void setup()
 
     rs485Serial.begin(9600, SERIAL_8N1, PIN_RS485_RX, PIN_RS485_TX);
 
-    initRegisters();
-
     bool adxlReady = initADXL345();
     if (adxlReady)
     {
         Serial.println("ADXL345 initialized successfully.");
-        runtimeState.status = STATUS_NORMAL;
-        setPixelColor(0, 40, 0);
     }
     else
     {
         Serial.println("ERROR: ADXL345 not detected. Check wiring.");
-        runtimeState.status = STATUS_FAULT;
-        setPixelColor(40, 0, 0);
     }
 
+    // Modbus RTU slave
+    mb.begin(&rs485Serial, PIN_RS485_EN);
+    mb.slave(MODBUS_ADDRESS);
+
+    setupModbusRegisters();
+    updateNodeStatus();
     updateStatusLed();
-    syncRegistersFromState();
+    syncModbusRegisters();
 }
 
 // ============================================================
@@ -529,7 +608,11 @@ void loop()
         updateVibrationMetrics();
     }
 
-    syncRegistersFromState();
+    updateNodeStatus();
+    updateStatusLed();
+    syncModbusRegisters();
+
+    mb.task();
 
     if (now - lastStatusPrintMs >= 1000)
     {
