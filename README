@@ -1,0 +1,57 @@
+
+# Motor Vibration Monitor (ESP32 + Modbus RTU)
+
+This project implements a multi-node industrial-style vibration monitoring system for bearing condition analysis using ESP32 microcontrollers.
+
+## System Overview
+
+- 5 ESP32 sensor nodes
+- 1 ESP32 gateway
+- RS-485 / Modbus RTU communication
+- Wi-Fi + WebSocket dashboard
+
+## Sensor Node Features
+
+Each node includes:
+- ADXL345 accelerometer (primary vibration sensor)
+- Piezo sensor (impact/spike detection)
+- WS2812 LED (local status indicator)
+- MAX485 (RS-485 interface)
+
+Each node performs:
+- RMS vibration calculation
+- BDU calculation (Bearing Damage Units)
+- Threshold comparison (Normal / Warning / Fault)
+- Modbus RTU slave communication
+
+## Gateway Features
+
+The gateway:
+- polls all 5 nodes via Modbus RTU
+- aggregates vibration data
+- hosts a web dashboard over Wi-Fi
+- streams live updates using WebSockets
+- allows threshold updates to nodes
+
+## Vibration Metric
+
+Primary metric:
+
+BDU = 100 × RMS acceleration (g)
+
+## Status States
+
+- NORMAL
+- WARNING
+- FAULT
+
+## Repository Structure
+
+```text
+src/
+  sensor_node/
+  gateway/
+docs/
+  modbus-register-map.md
+  wiring-node.md
+  wiring-gateway.md
