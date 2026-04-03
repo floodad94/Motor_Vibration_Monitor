@@ -1,5 +1,14 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <ModbusRTU.h>
+
+// ============================================================
+// WIFI CONFIGURATION
+// ============================================================
+static const char *WIFI_SSID = "YOUR_WIFI_SSID";
+static const char *WIFI_PASS = "YOUR_WIFI_PASSWORD";
 
 // ============================================================
 // GATEWAY CONFIGURATION
@@ -7,13 +16,14 @@
 static constexpr uint8_t NODE_COUNT = 5;
 static constexpr uint8_t FIRST_NODE_ADDRESS = 1;
 static constexpr uint32_t POLL_INTERVAL_MS = 500;
+static constexpr uint32_t WS_BROADCAST_INTERVAL_MS = 1000;
 
 // ============================================================
 // PIN DEFINITIONS
 // ============================================================
-static constexpr int PIN_RS485_RX = 16; // MAX485 RO
-static constexpr int PIN_RS485_TX = 17; // MAX485 DI
-static constexpr int PIN_RS485_EN = 18; // MAX485 DE and RE tied together
+static constexpr int PIN_RS485_RX = 16;
+static constexpr int PIN_RS485_TX = 17;
+static constexpr int PIN_RS485_EN = 18;
 
 // ============================================================
 // MODBUS REGISTER OFFSETS
@@ -41,6 +51,8 @@ enum InputRegisterOffset : uint16_t
 // ============================================================
 HardwareSerial rs485Serial(2);
 ModbusRTU mb;
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
 
 // ============================================================
 // DATA STRUCTURES
@@ -71,9 +83,201 @@ uint16_t nodeReadBuffer[IR_COUNT] = {0};
 // Polling state
 uint32_t lastPollMs = 0;
 uint32_t lastPrintMs = 0;
+uint32_t lastWsBroadcastMs = 0;
 bool modbusBusy = false;
 uint8_t currentPollIndex = 0;
 uint8_t activePollIndex = 0;
+
+// ============================================================
+// HTML PAGE
+// ============================================================
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Motor Vibration Monitor</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+      margin: 0;
+      padding: 20px;
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 1.8rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .card {
+      background: #1e293b;
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.25);
+      border-left: 8px solid #475569;
+    }
+
+    .card.normal {
+      border-left-color: #22c55e;
+    }
+
+    .card.warning {
+      border-left-color: #f59e0b;
+    }
+
+    .card.fault {
+      border-left-color: #ef4444;
+    }
+
+    .card.offline {
+      border-left-color: #64748b;
+      opacity: 0.8;
+    }
+
+    .title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      font-size: 1.1rem;
+      font-weight: bold;
+    }
+
+    .badge {
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.8rem;
+      font-weight: bold;
+      color: #111827;
+      background: #cbd5e1;
+    }
+
+    .badge.normal { background: #22c55e; }
+    .badge.warning { background: #f59e0b; }
+    .badge.fault { background: #ef4444; }
+    .badge.offline { background: #94a3b8; }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      margin: 6px 0;
+      font-size: 0.95rem;
+    }
+
+    .label {
+      color: #cbd5e1;
+    }
+
+    .value {
+      font-weight: bold;
+      color: #f8fafc;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .meta {
+      color: #cbd5e1;
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>Motor Vibration Monitor</h1>
+    <div class="meta">
+      Gateway WebSocket Dashboard
+    </div>
+  </div>
+
+  <div class="grid" id="nodeGrid"></div>
+
+  <script>
+    const nodeGrid = document.getElementById("nodeGrid");
+
+    function statusClass(node) {
+      if (!node.online) return "offline";
+      if (node.status === 0) return "normal";
+      if (node.status === 1) return "warning";
+      if (node.status === 2) return "fault";
+      return "offline";
+    }
+
+    function statusText(node) {
+      if (!node.online) return "OFFLINE";
+      if (node.status === 0) return "NORMAL";
+      if (node.status === 1) return "WARNING";
+      if (node.status === 2) return "FAULT";
+      return "UNKNOWN";
+    }
+
+    function renderNodes(payload) {
+      nodeGrid.innerHTML = "";
+
+      payload.nodes.forEach((node, index) => {
+        const cls = statusClass(node);
+        const status = statusText(node);
+
+        const card = document.createElement("div");
+        card.className = `card ${cls}`;
+
+        card.innerHTML = `
+          <div class="title">
+            <span>Node ${index + 1}</span>
+            <span class="badge ${cls}">${status}</span>
+          </div>
+          <div class="row"><span class="label">Slave Address</span><span class="value">${node.slave_address}</span></div>
+          <div class="row"><span class="label">Node ID</span><span class="value">${node.node_id}</span></div>
+          <div class="row"><span class="label">Online</span><span class="value">${node.online ? "YES" : "NO"}</span></div>
+          <div class="row"><span class="label">Overall RMS</span><span class="value">${(node.overall_rms_mg / 1000).toFixed(3)} g</span></div>
+          <div class="row"><span class="label">BDU</span><span class="value">${(node.bdu_x10 / 10).toFixed(1)}</span></div>
+          <div class="row"><span class="label">X RMS</span><span class="value">${(node.x_rms_mg / 1000).toFixed(3)} g</span></div>
+          <div class="row"><span class="label">Y RMS</span><span class="value">${(node.y_rms_mg / 1000).toFixed(3)} g</span></div>
+          <div class="row"><span class="label">Z RMS</span><span class="value">${(node.z_rms_mg / 1000).toFixed(3)} g</span></div>
+          <div class="row"><span class="label">Piezo Peak</span><span class="value">${node.piezo_peak}</span></div>
+          <div class="row"><span class="label">Piezo Level</span><span class="value">${node.piezo_level}</span></div>
+          <div class="row"><span class="label">Spike Count</span><span class="value">${node.spike_count_lo}</span></div>
+          <div class="row"><span class="label">Error Flags</span><span class="value">0x${Number(node.error_flags).toString(16).padStart(4,"0")}</span></div>
+          <div class="row"><span class="label">Uptime</span><span class="value">${node.uptime_seconds_lo} s</span></div>
+        `;
+
+        nodeGrid.appendChild(card);
+      });
+    }
+
+    function connectWs() {
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+
+      ws.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        renderNodes(payload);
+      };
+
+      ws.onclose = () => {
+        setTimeout(connectWs, 2000);
+      };
+    }
+
+    connectWs();
+  </script>
+</body>
+</html>
+)rawliteral";
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -173,12 +377,11 @@ void startNextPoll()
     modbusBusy = true;
 
     bool started = mb.readIreg(
-        slaveAddress,   // slave ID
-        0,              // starting register offset
-        nodeReadBuffer, // destination buffer
-        IR_COUNT,       // number of input registers
-        cbRead          // callback
-    );
+        slaveAddress,
+        0,
+        nodeReadBuffer,
+        IR_COUNT,
+        cbRead);
 
     if (!started)
     {
@@ -191,48 +394,6 @@ void startNextPoll()
     if (currentPollIndex >= NODE_COUNT)
     {
         currentPollIndex = 0;
-    }
-}
-
-void printOneNode(const NodeTelemetry &node, uint8_t index)
-{
-    Serial.println("--------------------------------------------------");
-    Serial.printf("Node Slot: %u\n", index + 1);
-    Serial.printf("Slave Address: %u\n", node.slave_address);
-
-    if (!node.online)
-    {
-        Serial.println("Online: NO");
-        return;
-    }
-
-    Serial.println("Online: YES");
-    Serial.printf("Node ID: %u\n", node.node_id);
-    Serial.printf("Status: %s (%u)\n", statusToString(node.status), node.status);
-
-    Serial.printf("X RMS: %.3f g\n", node.x_rms_mg / 1000.0f);
-    Serial.printf("Y RMS: %.3f g\n", node.y_rms_mg / 1000.0f);
-    Serial.printf("Z RMS: %.3f g\n", node.z_rms_mg / 1000.0f);
-    Serial.printf("Overall RMS: %.3f g\n", node.overall_rms_mg / 1000.0f);
-    Serial.printf("BDU: %.1f\n", node.bdu_x10 / 10.0f);
-
-    Serial.printf("Piezo Peak: %u\n", node.piezo_peak);
-    Serial.printf("Piezo Level: %u\n", node.piezo_level);
-    Serial.printf("Spike Count: %u\n", node.spike_count_lo);
-
-    Serial.printf("Error Flags: 0x%04X\n", node.error_flags);
-    Serial.printf("Uptime (low word): %u s\n", node.uptime_seconds_lo);
-    Serial.printf("Last Poll ms: %lu\n", static_cast<unsigned long>(node.last_poll_ms));
-}
-
-void printAllNodesSummary()
-{
-    Serial.println("==================================================");
-    Serial.println("Gateway Five-Node Summary");
-
-    for (uint8_t i = 0; i < NODE_COUNT; i++)
-    {
-        printOneNode(nodes[i], i);
     }
 }
 
@@ -255,6 +416,95 @@ void printCompactSummaryLine()
     Serial.println();
 }
 
+String buildNodesJson()
+{
+    String json = "{";
+    json += "\"nodes\":[";
+    for (uint8_t i = 0; i < NODE_COUNT; i++)
+    {
+        if (i > 0)
+            json += ",";
+
+        json += "{";
+        json += "\"slave_address\":" + String(nodes[i].slave_address) + ",";
+        json += "\"node_id\":" + String(nodes[i].node_id) + ",";
+        json += "\"status\":" + String(nodes[i].status) + ",";
+        json += "\"x_rms_mg\":" + String(nodes[i].x_rms_mg) + ",";
+        json += "\"y_rms_mg\":" + String(nodes[i].y_rms_mg) + ",";
+        json += "\"z_rms_mg\":" + String(nodes[i].z_rms_mg) + ",";
+        json += "\"overall_rms_mg\":" + String(nodes[i].overall_rms_mg) + ",";
+        json += "\"bdu_x10\":" + String(nodes[i].bdu_x10) + ",";
+        json += "\"piezo_peak\":" + String(nodes[i].piezo_peak) + ",";
+        json += "\"piezo_level\":" + String(nodes[i].piezo_level) + ",";
+        json += "\"spike_count_lo\":" + String(nodes[i].spike_count_lo) + ",";
+        json += "\"error_flags\":" + String(nodes[i].error_flags) + ",";
+        json += "\"uptime_seconds_lo\":" + String(nodes[i].uptime_seconds_lo) + ",";
+        json += "\"online\":" + String(nodes[i].online ? "true" : "false");
+        json += "}";
+    }
+    json += "]";
+    json += "}";
+    return json;
+}
+
+void broadcastNodeData()
+{
+    String payload = buildNodesJson();
+    ws.textAll(payload);
+}
+
+void connectWiFi()
+{
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    Serial.print("Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println();
+    Serial.print("Connected. Gateway IP: ");
+    Serial.println(WiFi.localIP());
+}
+
+void onWsEvent(AsyncWebSocket *server,
+               AsyncWebSocketClient *client,
+               AwsEventType type,
+               void *arg,
+               uint8_t *data,
+               size_t len)
+{
+    (void)server;
+    (void)arg;
+    (void)data;
+    (void)len;
+
+    if (type == WS_EVT_CONNECT)
+    {
+        Serial.printf("[Gateway] WebSocket client connected: %u\n", client->id());
+        client->text(buildNodesJson());
+    }
+    else if (type == WS_EVT_DISCONNECT)
+    {
+        Serial.printf("[Gateway] WebSocket client disconnected: %u\n", client->id());
+    }
+}
+
+void setupWebServer()
+{
+    ws.onEvent(onWsEvent);
+    server.addHandler(&ws);
+
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+              { request->send_P(200, "text/html", INDEX_HTML); });
+
+    server.begin();
+    Serial.println("Web server started.");
+}
+
 // ============================================================
 // ARDUINO SETUP
 // ============================================================
@@ -265,7 +515,7 @@ void setup()
 
     Serial.println();
     Serial.println("Motor Vibration Monitor - Gateway Boot");
-    Serial.println("Commit 7: five-node Modbus polling");
+    Serial.println("Commit 8: WebSocket dashboard for five nodes");
 
     pinMode(PIN_RS485_EN, OUTPUT);
     digitalWrite(PIN_RS485_EN, LOW);
@@ -276,6 +526,9 @@ void setup()
     mb.master();
 
     initializeNodeTable();
+
+    connectWiFi();
+    setupWebServer();
 }
 
 // ============================================================
@@ -286,6 +539,7 @@ void loop()
     uint32_t now = millis();
 
     mb.task();
+    ws.cleanupClients();
 
     if (now - lastPollMs >= POLL_INTERVAL_MS)
     {
@@ -293,10 +547,15 @@ void loop()
         startNextPoll();
     }
 
+    if (now - lastWsBroadcastMs >= WS_BROADCAST_INTERVAL_MS)
+    {
+        lastWsBroadcastMs = now;
+        broadcastNodeData();
+    }
+
     if (now - lastPrintMs >= 3000)
     {
         lastPrintMs = now;
         printCompactSummaryLine();
-        printAllNodesSummary();
     }
 }
