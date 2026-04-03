@@ -4,7 +4,9 @@
 // ============================================================
 // GATEWAY CONFIGURATION
 // ============================================================
-static constexpr uint8_t POLLED_NODE_ADDRESS = 1;
+static constexpr uint8_t NODE_COUNT = 5;
+static constexpr uint8_t FIRST_NODE_ADDRESS = 1;
+static constexpr uint32_t POLL_INTERVAL_MS = 500;
 
 // ============================================================
 // PIN DEFINITIONS
@@ -15,7 +17,7 @@ static constexpr int PIN_RS485_EN = 18; // MAX485 DE and RE tied together
 
 // ============================================================
 // MODBUS REGISTER OFFSETS
-// These match the sensor node firmware offsets.
+// Must match sensor node firmware.
 // ============================================================
 enum InputRegisterOffset : uint16_t
 {
@@ -60,17 +62,18 @@ struct NodeTelemetry
 
     bool online;
     uint32_t last_poll_ms;
+    uint8_t slave_address;
 };
 
-NodeTelemetry node1 = {0};
-
-// Temporary Modbus read buffer
+NodeTelemetry nodes[NODE_COUNT];
 uint16_t nodeReadBuffer[IR_COUNT] = {0};
 
-// Timing / state
+// Polling state
 uint32_t lastPollMs = 0;
 uint32_t lastPrintMs = 0;
 bool modbusBusy = false;
+uint8_t currentPollIndex = 0;
+uint8_t activePollIndex = 0;
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -87,6 +90,28 @@ const char *statusToString(uint16_t status)
         return "FAULT";
     default:
         return "UNKNOWN";
+    }
+}
+
+void initializeNodeTable()
+{
+    for (uint8_t i = 0; i < NODE_COUNT; i++)
+    {
+        nodes[i].node_id = 0;
+        nodes[i].status = 0;
+        nodes[i].x_rms_mg = 0;
+        nodes[i].y_rms_mg = 0;
+        nodes[i].z_rms_mg = 0;
+        nodes[i].overall_rms_mg = 0;
+        nodes[i].bdu_x10 = 0;
+        nodes[i].piezo_peak = 0;
+        nodes[i].piezo_level = 0;
+        nodes[i].spike_count_lo = 0;
+        nodes[i].error_flags = 0;
+        nodes[i].uptime_seconds_lo = 0;
+        nodes[i].online = false;
+        nodes[i].last_poll_ms = 0;
+        nodes[i].slave_address = FIRST_NODE_ADDRESS + i;
     }
 }
 
@@ -115,32 +140,73 @@ bool cbRead(Modbus::ResultCode event, uint16_t transactionId, void *data)
 
     modbusBusy = false;
 
+    if (activePollIndex >= NODE_COUNT)
+    {
+        return true;
+    }
+
     if (event == Modbus::EX_SUCCESS)
     {
-        copyReadBufferToNode(node1, nodeReadBuffer);
-        Serial.println("[Gateway] Modbus poll success.");
+        copyReadBufferToNode(nodes[activePollIndex], nodeReadBuffer);
+        Serial.printf("[Gateway] Poll success for slave %u\n", nodes[activePollIndex].slave_address);
     }
     else
     {
-        node1.online = false;
-        Serial.printf("[Gateway] Modbus poll failed. Result code: %d\n", event);
+        nodes[activePollIndex].online = false;
+        Serial.printf("[Gateway] Poll failed for slave %u, result code: %d\n",
+                      nodes[activePollIndex].slave_address, event);
     }
 
     return true;
 }
 
-void printNodeTelemetry(const NodeTelemetry &node)
+void startNextPoll()
 {
-    Serial.println("==================================================");
-    Serial.println("Gateway Poll Result");
-
-    if (!node.online)
+    if (modbusBusy)
     {
-        Serial.println("Node online: NO");
         return;
     }
 
-    Serial.println("Node online: YES");
+    activePollIndex = currentPollIndex;
+    uint8_t slaveAddress = nodes[activePollIndex].slave_address;
+
+    modbusBusy = true;
+
+    bool started = mb.readIreg(
+        slaveAddress,   // slave ID
+        0,              // starting register offset
+        nodeReadBuffer, // destination buffer
+        IR_COUNT,       // number of input registers
+        cbRead          // callback
+    );
+
+    if (!started)
+    {
+        modbusBusy = false;
+        nodes[activePollIndex].online = false;
+        Serial.printf("[Gateway] Failed to start poll for slave %u\n", slaveAddress);
+    }
+
+    currentPollIndex++;
+    if (currentPollIndex >= NODE_COUNT)
+    {
+        currentPollIndex = 0;
+    }
+}
+
+void printOneNode(const NodeTelemetry &node, uint8_t index)
+{
+    Serial.println("--------------------------------------------------");
+    Serial.printf("Node Slot: %u\n", index + 1);
+    Serial.printf("Slave Address: %u\n", node.slave_address);
+
+    if (!node.online)
+    {
+        Serial.println("Online: NO");
+        return;
+    }
+
+    Serial.println("Online: YES");
     Serial.printf("Node ID: %u\n", node.node_id);
     Serial.printf("Status: %s (%u)\n", statusToString(node.status), node.status);
 
@@ -159,29 +225,34 @@ void printNodeTelemetry(const NodeTelemetry &node)
     Serial.printf("Last Poll ms: %lu\n", static_cast<unsigned long>(node.last_poll_ms));
 }
 
-void startSingleNodePoll()
+void printAllNodesSummary()
 {
-    if (modbusBusy)
+    Serial.println("==================================================");
+    Serial.println("Gateway Five-Node Summary");
+
+    for (uint8_t i = 0; i < NODE_COUNT; i++)
     {
-        return;
+        printOneNode(nodes[i], i);
     }
+}
 
-    modbusBusy = true;
-
-    bool started = mb.readIreg(
-        POLLED_NODE_ADDRESS, // slave ID
-        0,                   // starting input register offset
-        nodeReadBuffer,      // destination buffer
-        IR_COUNT,            // number of registers
-        cbRead               // callback
-    );
-
-    if (!started)
+void printCompactSummaryLine()
+{
+    Serial.print("[Gateway Summary] ");
+    for (uint8_t i = 0; i < NODE_COUNT; i++)
     {
-        modbusBusy = false;
-        node1.online = false;
-        Serial.println("[Gateway] Failed to start Modbus read transaction.");
+        Serial.printf("N%u:", i + 1);
+        if (!nodes[i].online)
+        {
+            Serial.print("OFFLINE ");
+            continue;
+        }
+
+        Serial.printf("%s,BDU=%.1f ",
+                      statusToString(nodes[i].status),
+                      nodes[i].bdu_x10 / 10.0f);
     }
+    Serial.println();
 }
 
 // ============================================================
@@ -194,7 +265,7 @@ void setup()
 
     Serial.println();
     Serial.println("Motor Vibration Monitor - Gateway Boot");
-    Serial.println("Commit 6: Modbus master polling one node");
+    Serial.println("Commit 7: five-node Modbus polling");
 
     pinMode(PIN_RS485_EN, OUTPUT);
     digitalWrite(PIN_RS485_EN, LOW);
@@ -204,8 +275,7 @@ void setup()
     mb.begin(&rs485Serial, PIN_RS485_EN);
     mb.master();
 
-    node1.online = false;
-    node1.last_poll_ms = 0;
+    initializeNodeTable();
 }
 
 // ============================================================
@@ -217,15 +287,16 @@ void loop()
 
     mb.task();
 
-    if (now - lastPollMs >= 1000)
+    if (now - lastPollMs >= POLL_INTERVAL_MS)
     {
         lastPollMs = now;
-        startSingleNodePoll();
+        startNextPoll();
     }
 
-    if (now - lastPrintMs >= 2000)
+    if (now - lastPrintMs >= 3000)
     {
         lastPrintMs = now;
-        printNodeTelemetry(node1);
+        printCompactSummaryLine();
+        printAllNodesSummary();
     }
 }
