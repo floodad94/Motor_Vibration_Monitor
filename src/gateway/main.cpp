@@ -3,6 +3,7 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ModbusRTU.h>
+#include <SPIFFS.h>
 
 // ============================================================
 // WIFI CONFIGURATION
@@ -125,316 +126,234 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Motor Vibration Monitor</title>
+
   <style>
+    :root {
+      --green: #0f8f5f;
+      --red: #d62828;
+      --dark: #0b1f1a;
+      --card: #122b24;
+      --border: #1f4d3c;
+      --text: #e8f5f0;
+      --muted: #a7c4b7;
+      --warning: #f59e0b;
+    }
+
     body {
       font-family: Arial, sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
+      background: linear-gradient(135deg, #061a14, #0b2f25);
+      color: var(--text);
       margin: 0;
       padding: 20px;
     }
 
-    h1 {
-      margin: 0;
-      font-size: 1.8rem;
-    }
-
     .topbar {
       display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 20px;
+      margin-bottom: 25px;
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 10px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .brand img {
+      height: 50px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      color: var(--green);
     }
 
     .meta {
-      color: #cbd5e1;
-      font-size: 0.95rem;
-      line-height: 1.5;
-    }
-
-    .meta strong {
-      color: #f8fafc;
+      font-size: 0.9rem;
+      color: var(--muted);
     }
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 18px;
     }
 
     .card {
-      background: #1e293b;
+      background: var(--card);
       border-radius: 14px;
       padding: 16px;
-      box-shadow: 0 4px 18px rgba(0,0,0,0.25);
-      border-left: 8px solid #475569;
+      border-left: 6px solid var(--border);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+      transition: transform 0.15s ease;
     }
 
-    .card.normal { border-left-color: #22c55e; }
-    .card.warning { border-left-color: #f59e0b; }
-    .card.fault { border-left-color: #ef4444; }
-    .card.offline { border-left-color: #64748b; opacity: 0.82; }
+    .card:hover {
+      transform: translateY(-3px);
+    }
+
+    .card.normal { border-left-color: var(--green); }
+    .card.warning { border-left-color: var(--warning); }
+    .card.fault { border-left-color: var(--red); }
+    .card.offline { border-left-color: #555; opacity: 0.7; }
 
     .title {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 10px;
-      gap: 10px;
-    }
-
-    .title-left {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
     }
 
     .title-main {
-      font-size: 1.08rem;
       font-weight: bold;
-    }
-
-    .title-sub {
-      font-size: 0.84rem;
-      color: #cbd5e1;
+      font-size: 1.1rem;
     }
 
     .badge {
-      border-radius: 999px;
       padding: 4px 10px;
-      font-size: 0.8rem;
+      border-radius: 20px;
+      font-size: 0.75rem;
       font-weight: bold;
-      color: #111827;
-      background: #cbd5e1;
-      white-space: nowrap;
+      color: #fff;
     }
 
-    .badge.normal { background: #22c55e; }
-    .badge.warning { background: #f59e0b; }
-    .badge.fault { background: #ef4444; }
-    .badge.offline { background: #94a3b8; }
+    .badge.normal { background: var(--green); }
+    .badge.warning { background: var(--warning); }
+    .badge.fault { background: var(--red); }
+    .badge.offline { background: #666; }
 
     .section {
       margin-top: 14px;
-      padding-top: 12px;
-      border-top: 1px solid #334155;
-    }
-
-    .section h3 {
-      margin: 0 0 10px 0;
-      font-size: 0.98rem;
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
     }
 
     .row {
       display: flex;
       justify-content: space-between;
       margin: 6px 0;
-      gap: 12px;
-      font-size: 0.95rem;
+      font-size: 0.92rem;
     }
 
-    .label {
-      color: #cbd5e1;
-    }
+    .label { color: var(--muted); }
+    .value { font-weight: bold; }
 
-    .value {
-      font-weight: bold;
-      color: #f8fafc;
-      text-align: right;
-    }
-
-    .config-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-
-    input, select, button {
+    input, select {
       width: 100%;
-      box-sizing: border-box;
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid #475569;
-      background: #0f172a;
-      color: #f8fafc;
+      padding: 6px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #081f18;
+      color: white;
     }
 
     button {
-      background: #2563eb;
-      border: none;
-      cursor: pointer;
-      font-weight: bold;
+      width: 100%;
+      padding: 8px;
       margin-top: 8px;
+      border-radius: 8px;
+      border: none;
+      background: var(--green);
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
     }
 
     button:hover {
-      background: #1d4ed8;
-    }
-
-    .full {
-      grid-column: span 2;
-    }
-
-    .small {
-      font-size: 0.82rem;
-      color: #cbd5e1;
-      margin-top: 6px;
+      background: #0c6e49;
     }
   </style>
 </head>
+
 <body>
-  <div class="topbar">
-    <div>
-      <h1>Motor Vibration Monitor</h1>
-      <div class="meta" id="gatewayMeta">Connecting...</div>
-    </div>
+
+<div class="topbar">
+  <div class="brand">
+    <img src="/logo.png">
+    <h1>Motor Vibration Monitor</h1>
   </div>
+  <div class="meta" id="gatewayMeta">Connecting...</div>
+</div>
 
-  <div class="grid" id="nodeGrid"></div>
+<div class="grid" id="nodeGrid"></div>
 
-  <script>
-    const nodeGrid = document.getElementById("nodeGrid");
-    const gatewayMeta = document.getElementById("gatewayMeta");
+<script>
+const nodeGrid = document.getElementById("nodeGrid");
+const gatewayMeta = document.getElementById("gatewayMeta");
 
-    function statusClass(node) {
-      if (!node.online) return "offline";
-      if (node.status === 0) return "normal";
-      if (node.status === 1) return "warning";
-      if (node.status === 2) return "fault";
-      return "offline";
-    }
+function statusClass(node) {
+  if (!node.online) return "offline";
+  if (node.status === 0) return "normal";
+  if (node.status === 1) return "warning";
+  if (node.status === 2) return "fault";
+  return "offline";
+}
 
-    function statusText(node) {
-      if (!node.online) return "OFFLINE";
-      if (node.status === 0) return "NORMAL";
-      if (node.status === 1) return "WARNING";
-      if (node.status === 2) return "FAULT";
-      return "UNKNOWN";
-    }
+function renderGatewayMeta(payload) {
+  gatewayMeta.innerHTML =
+    `IP: ${payload.gateway_ip} | Online: ${payload.online_nodes}/${payload.node_count}`;
+}
 
-    async function submitConfig(slaveAddress) {
-      const warnBdu = document.getElementById(`warn_bdu_${slaveAddress}`).value;
-      const faultBdu = document.getElementById(`fault_bdu_${slaveAddress}`).value;
-      const piezoWarn = document.getElementById(`piezo_warn_${slaveAddress}`).value;
-      const piezoFault = document.getElementById(`piezo_fault_${slaveAddress}`).value;
-      const ledEnable = document.getElementById(`led_enable_${slaveAddress}`).value;
+function renderNodes(payload) {
+  nodeGrid.innerHTML = "";
 
-      const body = new URLSearchParams();
-      body.append("slave_address", slaveAddress);
-      body.append("warning_bdu", warnBdu);
-      body.append("fault_bdu", faultBdu);
-      body.append("piezo_warning", piezoWarn);
-      body.append("piezo_fault", piezoFault);
-      body.append("led_enable", ledEnable);
+  payload.nodes.forEach(node => {
+    const cls = statusClass(node);
 
-      const response = await fetch("/set-config", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString()
-      });
+    const card = document.createElement("div");
+    card.className = `card ${cls}`;
 
-      const text = await response.text();
-      alert(text);
-    }
+    card.innerHTML = `
+      <div class="title">
+        <span class="title-main">${node.display_name}</span>
+        <span class="badge ${cls}">${node.status}</span>
+      </div>
 
-    function renderGatewayMeta(payload) {
-      gatewayMeta.innerHTML =
-        `<strong>Wi-Fi:</strong> ${payload.wifi_connected ? "Connected" : "Disconnected"} &nbsp;|&nbsp; ` +
-        `<strong>IP:</strong> ${payload.gateway_ip} &nbsp;|&nbsp; ` +
-        `<strong>Online Nodes:</strong> ${payload.online_nodes}/${payload.node_count}`;
-    }
+      <div class="section">
+        <div class="row"><span class="label">BDU</span><span class="value">${(node.bdu_x10/10).toFixed(1)}</span></div>
+        <div class="row"><span class="label">RMS</span><span class="value">${(node.overall_rms_mg/1000).toFixed(3)} g</span></div>
+        <div class="row"><span class="label">Age</span><span class="value">${(node.age_ms/1000).toFixed(1)} s</span></div>
+      </div>
 
-    function renderNodes(payload) {
-      nodeGrid.innerHTML = "";
+      <div class="section">
+        <div class="row"><span class="label">Warn BDU</span><input id="w${node.slave_address}" value="${(node.warning_bdu_x10/10).toFixed(1)}"></div>
+        <div class="row"><span class="label">Fault BDU</span><input id="f${node.slave_address}" value="${(node.fault_bdu_x10/10).toFixed(1)}"></div>
+        <button onclick="send(${node.slave_address})">Apply</button>
+      </div>
+    `;
 
-      payload.nodes.forEach((node, index) => {
-        const cls = statusClass(node);
-        const status = statusText(node);
+    nodeGrid.appendChild(card);
+  });
+}
 
-        const card = document.createElement("div");
-        card.className = `card ${cls}`;
+async function send(addr) {
+  const w = document.getElementById(`w${addr}`).value;
+  const f = document.getElementById(`f${addr}`).value;
 
-        card.innerHTML = `
-          <div class="title">
-            <div class="title-left">
-              <div class="title-main">${node.display_name}</div>
-              <div class="title-sub">Slave ${node.slave_address}</div>
-            </div>
-            <span class="badge ${cls}">${status}</span>
-          </div>
+  await fetch("/set-config", {
+    method: "POST",
+    headers: {"Content-Type":"application/x-www-form-urlencoded"},
+    body: `slave_address=${addr}&warning_bdu=${w}&fault_bdu=${f}&piezo_warning=1000&piezo_fault=2000&led_enable=1`
+  });
 
-          <div class="section">
-            <h3>Telemetry</h3>
-            <div class="row"><span class="label">Node ID</span><span class="value">${node.node_id}</span></div>
-            <div class="row"><span class="label">Online</span><span class="value">${node.online ? "YES" : "NO"}</span></div>
-            <div class="row"><span class="label">Last Update Age</span><span class="value">${(node.age_ms / 1000).toFixed(1)} s</span></div>
-            <div class="row"><span class="label">Overall RMS</span><span class="value">${(node.overall_rms_mg / 1000).toFixed(3)} g</span></div>
-            <div class="row"><span class="label">BDU</span><span class="value">${(node.bdu_x10 / 10).toFixed(1)}</span></div>
-            <div class="row"><span class="label">X RMS</span><span class="value">${(node.x_rms_mg / 1000).toFixed(3)} g</span></div>
-            <div class="row"><span class="label">Y RMS</span><span class="value">${(node.y_rms_mg / 1000).toFixed(3)} g</span></div>
-            <div class="row"><span class="label">Z RMS</span><span class="value">${(node.z_rms_mg / 1000).toFixed(3)} g</span></div>
-            <div class="row"><span class="label">Piezo Peak</span><span class="value">${node.piezo_peak}</span></div>
-            <div class="row"><span class="label">Piezo Level</span><span class="value">${node.piezo_level}</span></div>
-            <div class="row"><span class="label">Spike Count</span><span class="value">${node.spike_count_lo}</span></div>
-            <div class="row"><span class="label">Error Flags</span><span class="value">0x${Number(node.error_flags).toString(16).padStart(4,"0")}</span></div>
-            <div class="row"><span class="label">Uptime</span><span class="value">${node.uptime_seconds_lo} s</span></div>
-          </div>
+  alert("Updated");
+}
 
-          <div class="section">
-            <h3>Configuration</h3>
-            <div class="config-grid">
-              <div>
-                <div class="small">Warning BDU</div>
-                <input id="warn_bdu_${node.slave_address}" type="number" step="0.1" value="${(node.warning_bdu_x10 / 10).toFixed(1)}">
-              </div>
-              <div>
-                <div class="small">Fault BDU</div>
-                <input id="fault_bdu_${node.slave_address}" type="number" step="0.1" value="${(node.fault_bdu_x10 / 10).toFixed(1)}">
-              </div>
-              <div>
-                <div class="small">Piezo Warning</div>
-                <input id="piezo_warn_${node.slave_address}" type="number" step="1" value="${node.piezo_warn_threshold}">
-              </div>
-              <div>
-                <div class="small">Piezo Fault</div>
-                <input id="piezo_fault_${node.slave_address}" type="number" step="1" value="${node.piezo_fault_threshold}">
-              </div>
-              <div class="full">
-                <div class="small">LED Enable</div>
-                <select id="led_enable_${node.slave_address}">
-                  <option value="1" ${node.led_enable ? "selected" : ""}>Enabled</option>
-                  <option value="0" ${!node.led_enable ? "selected" : ""}>Disabled</option>
-                </select>
-              </div>
-              <div class="full">
-                <button onclick="submitConfig(${node.slave_address})">Apply to ${node.display_name}</button>
-              </div>
-            </div>
-          </div>
-        `;
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = (e)=>{
+    const data = JSON.parse(e.data);
+    renderGatewayMeta(data);
+    renderNodes(data);
+  };
+}
+connect();
+</script>
 
-        nodeGrid.appendChild(card);
-      });
-    }
-
-    function connectWs() {
-      const ws = new WebSocket(`ws://${location.host}/ws`);
-
-      ws.onmessage = (event) => {
-        const payload = JSON.parse(event.data);
-        renderGatewayMeta(payload);
-        renderNodes(payload);
-      };
-
-      ws.onclose = () => {
-        setTimeout(connectWs, 2000);
-      };
-    }
-
-    connectWs();
-  </script>
 </body>
 </html>
 )rawliteral";
@@ -774,6 +693,9 @@ void setupWebServer()
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
               { request->send_P(200, "text/html", INDEX_HTML); });
 
+    server.on("/logo.png", HTTP_GET, [](AsyncWebServerRequest *request)
+              { request->send(SPIFFS, "/logo.png", "image/png"); });
+
     server.on("/set-config", HTTP_POST, [](AsyncWebServerRequest *request)
               {
         if (!request->hasParam("slave_address", true) ||
@@ -844,6 +766,12 @@ void setup()
     Serial.println();
     Serial.println("Motor Vibration Monitor - Gateway Boot");
     Serial.println("Commit 10: dashboard polish and stale-node handling");
+
+    if (!SPIFFS.begin(true))
+    {
+        Serial.println("SPIFFS Mount Failed");
+        return;
+    }
 
     pinMode(PIN_RS485_EN, OUTPUT);
     digitalWrite(PIN_RS485_EN, LOW);
