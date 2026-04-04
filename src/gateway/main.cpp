@@ -17,6 +17,7 @@ static constexpr uint8_t NODE_COUNT = 5;
 static constexpr uint8_t FIRST_NODE_ADDRESS = 1;
 static constexpr uint32_t POLL_INTERVAL_MS = 500;
 static constexpr uint32_t WS_BROADCAST_INTERVAL_MS = 1000;
+static constexpr uint32_t NODE_STALE_TIMEOUT_MS = 5000;
 
 // ============================================================
 // PIN DEFINITIONS
@@ -84,9 +85,10 @@ struct NodeTelemetry
 
     bool online;
     uint32_t last_poll_ms;
+    uint32_t age_ms;
     uint8_t slave_address;
+    String display_name;
 
-    // cached config shown on dashboard / last requested values
     uint16_t warning_bdu_x10;
     uint16_t fault_bdu_x10;
     uint16_t piezo_warn_threshold;
@@ -133,15 +135,33 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     }
 
     h1 {
-      margin-top: 0;
+      margin: 0;
       font-size: 1.8rem;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .meta {
+      color: #cbd5e1;
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+
+    .meta strong {
+      color: #f8fafc;
     }
 
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 16px;
-      margin-top: 20px;
     }
 
     .card {
@@ -155,15 +175,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     .card.normal { border-left-color: #22c55e; }
     .card.warning { border-left-color: #f59e0b; }
     .card.fault { border-left-color: #ef4444; }
-    .card.offline { border-left-color: #64748b; opacity: 0.8; }
+    .card.offline { border-left-color: #64748b; opacity: 0.82; }
 
     .title {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 10px;
-      font-size: 1.1rem;
+      gap: 10px;
+    }
+
+    .title-left {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .title-main {
+      font-size: 1.08rem;
       font-weight: bold;
+    }
+
+    .title-sub {
+      font-size: 0.84rem;
+      color: #cbd5e1;
     }
 
     .badge {
@@ -173,6 +208,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       font-weight: bold;
       color: #111827;
       background: #cbd5e1;
+      white-space: nowrap;
     }
 
     .badge.normal { background: #22c55e; }
@@ -180,12 +216,23 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     .badge.fault { background: #ef4444; }
     .badge.offline { background: #94a3b8; }
 
+    .section {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid #334155;
+    }
+
+    .section h3 {
+      margin: 0 0 10px 0;
+      font-size: 0.98rem;
+    }
+
     .row {
       display: flex;
       justify-content: space-between;
       margin: 6px 0;
-      font-size: 0.95rem;
       gap: 12px;
+      font-size: 0.95rem;
     }
 
     .label {
@@ -195,30 +242,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     .value {
       font-weight: bold;
       color: #f8fafc;
-    }
-
-    .topbar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    .meta {
-      color: #cbd5e1;
-      font-size: 0.95rem;
-    }
-
-    .config {
-      margin-top: 16px;
-      padding-top: 14px;
-      border-top: 1px solid #334155;
-    }
-
-    .config h3 {
-      margin: 0 0 10px 0;
-      font-size: 1rem;
+      text-align: right;
     }
 
     .config-grid {
@@ -262,14 +286,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 </head>
 <body>
   <div class="topbar">
-    <h1>Motor Vibration Monitor</h1>
-    <div class="meta">Gateway Dashboard + Remote Configuration</div>
+    <div>
+      <h1>Motor Vibration Monitor</h1>
+      <div class="meta" id="gatewayMeta">Connecting...</div>
+    </div>
   </div>
 
   <div class="grid" id="nodeGrid"></div>
 
   <script>
     const nodeGrid = document.getElementById("nodeGrid");
+    const gatewayMeta = document.getElementById("gatewayMeta");
 
     function statusClass(node) {
       if (!node.online) return "offline";
@@ -312,6 +339,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       alert(text);
     }
 
+    function renderGatewayMeta(payload) {
+      gatewayMeta.innerHTML =
+        `<strong>Wi-Fi:</strong> ${payload.wifi_connected ? "Connected" : "Disconnected"} &nbsp;|&nbsp; ` +
+        `<strong>IP:</strong> ${payload.gateway_ip} &nbsp;|&nbsp; ` +
+        `<strong>Online Nodes:</strong> ${payload.online_nodes}/${payload.node_count}`;
+    }
+
     function renderNodes(payload) {
       nodeGrid.innerHTML = "";
 
@@ -324,25 +358,32 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
         card.innerHTML = `
           <div class="title">
-            <span>Node ${index + 1}</span>
+            <div class="title-left">
+              <div class="title-main">${node.display_name}</div>
+              <div class="title-sub">Slave ${node.slave_address}</div>
+            </div>
             <span class="badge ${cls}">${status}</span>
           </div>
-          <div class="row"><span class="label">Slave Address</span><span class="value">${node.slave_address}</span></div>
-          <div class="row"><span class="label">Node ID</span><span class="value">${node.node_id}</span></div>
-          <div class="row"><span class="label">Online</span><span class="value">${node.online ? "YES" : "NO"}</span></div>
-          <div class="row"><span class="label">Overall RMS</span><span class="value">${(node.overall_rms_mg / 1000).toFixed(3)} g</span></div>
-          <div class="row"><span class="label">BDU</span><span class="value">${(node.bdu_x10 / 10).toFixed(1)}</span></div>
-          <div class="row"><span class="label">X RMS</span><span class="value">${(node.x_rms_mg / 1000).toFixed(3)} g</span></div>
-          <div class="row"><span class="label">Y RMS</span><span class="value">${(node.y_rms_mg / 1000).toFixed(3)} g</span></div>
-          <div class="row"><span class="label">Z RMS</span><span class="value">${(node.z_rms_mg / 1000).toFixed(3)} g</span></div>
-          <div class="row"><span class="label">Piezo Peak</span><span class="value">${node.piezo_peak}</span></div>
-          <div class="row"><span class="label">Piezo Level</span><span class="value">${node.piezo_level}</span></div>
-          <div class="row"><span class="label">Spike Count</span><span class="value">${node.spike_count_lo}</span></div>
-          <div class="row"><span class="label">Error Flags</span><span class="value">0x${Number(node.error_flags).toString(16).padStart(4,"0")}</span></div>
-          <div class="row"><span class="label">Uptime</span><span class="value">${node.uptime_seconds_lo} s</span></div>
 
-          <div class="config">
-            <h3>Threshold Configuration</h3>
+          <div class="section">
+            <h3>Telemetry</h3>
+            <div class="row"><span class="label">Node ID</span><span class="value">${node.node_id}</span></div>
+            <div class="row"><span class="label">Online</span><span class="value">${node.online ? "YES" : "NO"}</span></div>
+            <div class="row"><span class="label">Last Update Age</span><span class="value">${(node.age_ms / 1000).toFixed(1)} s</span></div>
+            <div class="row"><span class="label">Overall RMS</span><span class="value">${(node.overall_rms_mg / 1000).toFixed(3)} g</span></div>
+            <div class="row"><span class="label">BDU</span><span class="value">${(node.bdu_x10 / 10).toFixed(1)}</span></div>
+            <div class="row"><span class="label">X RMS</span><span class="value">${(node.x_rms_mg / 1000).toFixed(3)} g</span></div>
+            <div class="row"><span class="label">Y RMS</span><span class="value">${(node.y_rms_mg / 1000).toFixed(3)} g</span></div>
+            <div class="row"><span class="label">Z RMS</span><span class="value">${(node.z_rms_mg / 1000).toFixed(3)} g</span></div>
+            <div class="row"><span class="label">Piezo Peak</span><span class="value">${node.piezo_peak}</span></div>
+            <div class="row"><span class="label">Piezo Level</span><span class="value">${node.piezo_level}</span></div>
+            <div class="row"><span class="label">Spike Count</span><span class="value">${node.spike_count_lo}</span></div>
+            <div class="row"><span class="label">Error Flags</span><span class="value">0x${Number(node.error_flags).toString(16).padStart(4,"0")}</span></div>
+            <div class="row"><span class="label">Uptime</span><span class="value">${node.uptime_seconds_lo} s</span></div>
+          </div>
+
+          <div class="section">
+            <h3>Configuration</h3>
             <div class="config-grid">
               <div>
                 <div class="small">Warning BDU</div>
@@ -368,7 +409,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 </select>
               </div>
               <div class="full">
-                <button onclick="submitConfig(${node.slave_address})">Apply to Node ${index + 1}</button>
+                <button onclick="submitConfig(${node.slave_address})">Apply to ${node.display_name}</button>
               </div>
             </div>
           </div>
@@ -383,6 +424,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
       ws.onmessage = (event) => {
         const payload = JSON.parse(event.data);
+        renderGatewayMeta(payload);
         renderNodes(payload);
       };
 
@@ -415,6 +457,50 @@ const char *statusToString(uint16_t status)
     }
 }
 
+String getGatewayIpString()
+{
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        return WiFi.localIP().toString();
+    }
+    return String("Not Connected");
+}
+
+uint8_t countOnlineNodes()
+{
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < NODE_COUNT; i++)
+    {
+        if (nodes[i].online)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+void updateNodeAgesAndStaleStatus()
+{
+    uint32_t now = millis();
+
+    for (uint8_t i = 0; i < NODE_COUNT; i++)
+    {
+        if (nodes[i].last_poll_ms == 0)
+        {
+            nodes[i].age_ms = 0;
+            nodes[i].online = false;
+            continue;
+        }
+
+        nodes[i].age_ms = now - nodes[i].last_poll_ms;
+
+        if (nodes[i].age_ms > NODE_STALE_TIMEOUT_MS)
+        {
+            nodes[i].online = false;
+        }
+    }
+}
+
 void initializeNodeTable()
 {
     for (uint8_t i = 0; i < NODE_COUNT; i++)
@@ -433,7 +519,9 @@ void initializeNodeTable()
         nodes[i].uptime_seconds_lo = 0;
         nodes[i].online = false;
         nodes[i].last_poll_ms = 0;
+        nodes[i].age_ms = 0;
         nodes[i].slave_address = FIRST_NODE_ADDRESS + i;
+        nodes[i].display_name = "Node " + String(i + 1);
 
         nodes[i].warning_bdu_x10 = 150;
         nodes[i].fault_bdu_x10 = 300;
@@ -459,6 +547,7 @@ void copyReadBufferToNode(NodeTelemetry &node, const uint16_t *buffer)
     node.uptime_seconds_lo = buffer[IR_UPTIME_SECONDS_LO];
     node.online = true;
     node.last_poll_ms = millis();
+    node.age_ms = 0;
 }
 
 bool cbRead(Modbus::ResultCode event, uint16_t transactionId, void *data)
@@ -476,13 +565,17 @@ bool cbRead(Modbus::ResultCode event, uint16_t transactionId, void *data)
     if (event == Modbus::EX_SUCCESS)
     {
         copyReadBufferToNode(nodes[activePollIndex], nodeReadBuffer);
-        Serial.printf("[Gateway] Poll success for slave %u\n", nodes[activePollIndex].slave_address);
+        Serial.printf("[Gateway] Poll success for %s (slave %u)\n",
+                      nodes[activePollIndex].display_name.c_str(),
+                      nodes[activePollIndex].slave_address);
     }
     else
     {
         nodes[activePollIndex].online = false;
-        Serial.printf("[Gateway] Poll failed for slave %u, result code: %d\n",
-                      nodes[activePollIndex].slave_address, event);
+        Serial.printf("[Gateway] Poll failed for %s (slave %u), result code: %d\n",
+                      nodes[activePollIndex].display_name.c_str(),
+                      nodes[activePollIndex].slave_address,
+                      event);
     }
 
     return true;
@@ -571,16 +664,17 @@ void printCompactSummaryLine()
     Serial.print("[Gateway Summary] ");
     for (uint8_t i = 0; i < NODE_COUNT; i++)
     {
-        Serial.printf("N%u:", i + 1);
+        Serial.printf("%s:", nodes[i].display_name.c_str());
         if (!nodes[i].online)
         {
             Serial.print("OFFLINE ");
             continue;
         }
 
-        Serial.printf("%s,BDU=%.1f ",
+        Serial.printf("%s,BDU=%.1f,Age=%.1fs ",
                       statusToString(nodes[i].status),
-                      nodes[i].bdu_x10 / 10.0f);
+                      nodes[i].bdu_x10 / 10.0f,
+                      nodes[i].age_ms / 1000.0f);
     }
     Serial.println();
 }
@@ -588,6 +682,10 @@ void printCompactSummaryLine()
 String buildNodesJson()
 {
     String json = "{";
+    json += "\"wifi_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+    json += "\"gateway_ip\":\"" + getGatewayIpString() + "\",";
+    json += "\"node_count\":" + String(NODE_COUNT) + ",";
+    json += "\"online_nodes\":" + String(countOnlineNodes()) + ",";
     json += "\"nodes\":[";
     for (uint8_t i = 0; i < NODE_COUNT; i++)
     {
@@ -595,6 +693,7 @@ String buildNodesJson()
             json += ",";
 
         json += "{";
+        json += "\"display_name\":\"" + nodes[i].display_name + "\",";
         json += "\"slave_address\":" + String(nodes[i].slave_address) + ",";
         json += "\"node_id\":" + String(nodes[i].node_id) + ",";
         json += "\"status\":" + String(nodes[i].status) + ",";
@@ -613,6 +712,7 @@ String buildNodesJson()
         json += "\"piezo_warn_threshold\":" + String(nodes[i].piezo_warn_threshold) + ",";
         json += "\"piezo_fault_threshold\":" + String(nodes[i].piezo_fault_threshold) + ",";
         json += "\"led_enable\":" + String(nodes[i].led_enable) + ",";
+        json += "\"age_ms\":" + String(nodes[i].age_ms) + ",";
         json += "\"online\":" + String(nodes[i].online ? "true" : "false");
         json += "}";
     }
@@ -743,7 +843,7 @@ void setup()
 
     Serial.println();
     Serial.println("Motor Vibration Monitor - Gateway Boot");
-    Serial.println("Commit 9: remote threshold configuration over Modbus");
+    Serial.println("Commit 10: dashboard polish and stale-node handling");
 
     pinMode(PIN_RS485_EN, OUTPUT);
     digitalWrite(PIN_RS485_EN, LOW);
@@ -769,6 +869,7 @@ void loop()
     mb.task();
     ws.cleanupClients();
 
+    updateNodeAgesAndStaleStatus();
     processPendingWrite();
 
     if (now - lastPollMs >= POLL_INTERVAL_MS)
