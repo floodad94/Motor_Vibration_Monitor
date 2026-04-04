@@ -8,8 +8,8 @@
 // ============================================================
 // WIFI CONFIGURATION
 // ============================================================
-static const char *WIFI_SSID = "YOUR_WIFI_SSID";
-static const char *WIFI_PASS = "YOUR_WIFI_PASSWORD";
+static const char *WIFI_SSID = "Flood";
+static const char *WIFI_PASS = "degreemajor821";
 
 // ============================================================
 // GATEWAY CONFIGURATION
@@ -129,31 +129,41 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <style>
     :root {
-      --green: #0f8f5f;
-      --red: #d62828;
-      --dark: #0b1f1a;
-      --card: #122b24;
-      --border: #1f4d3c;
-      --text: #e8f5f0;
-      --muted: #a7c4b7;
+      --green: #0aa064;
+      --green-dark: #06784b;
+      --red: #ef4444;
+      --red-dark: #c62828;
+      --bg1: #071611;
+      --bg2: #0b241c;
+      --panel: #0f2c22;
+      --border: #1e5b45;
+      --text: #eaf7f1;
+      --muted: #aac8bb;
       --warning: #f59e0b;
+      --offline: #64748b;
+      --graph-bg: #0a1d17;
+      --graph-grid: rgba(255,255,255,0.08);
     }
 
     body {
-      font-family: Arial, sans-serif;
-      background: linear-gradient(135deg, #061a14, #0b2f25);
-      color: var(--text);
       margin: 0;
-      padding: 20px;
+      padding: 24px;
+      font-family: Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top right, rgba(239,68,68,0.16), transparent 28%),
+        radial-gradient(circle at bottom left, rgba(10,160,100,0.18), transparent 36%),
+        linear-gradient(180deg, var(--bg1), var(--bg2));
     }
 
     .topbar {
       display: flex;
-      align-items: center;
       justify-content: space-between;
-      margin-bottom: 25px;
-      border-bottom: 2px solid var(--border);
-      padding-bottom: 10px;
+      align-items: center;
+      padding: 18px;
+      margin-bottom: 20px;
+      border-bottom: 4px solid var(--red);
+      box-shadow: 0 6px 18px rgba(239,68,68,0.08);
     }
 
     .brand {
@@ -163,108 +173,199 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     }
 
     .brand img {
-      height: 50px;
+      height: 60px;
+      background: white;
+      padding: 6px;
+      border-radius: 8px;
+      box-shadow: 0 0 14px rgba(239,68,68,0.15);
     }
 
     .brand h1 {
       margin: 0;
-      font-size: 1.5rem;
-      color: var(--green);
+      font-size: 1.8rem;
     }
 
     .meta {
-      font-size: 0.9rem;
       color: var(--muted);
+      font-size: 0.9rem;
     }
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
       gap: 18px;
     }
 
     .card {
-      background: var(--card);
+      background: var(--panel);
       border-radius: 14px;
       padding: 16px;
       border-left: 6px solid var(--border);
-      box-shadow: 0 6px 20px rgba(0,0,0,0.3);
-      transition: transform 0.15s ease;
+      border-top: 1px solid rgba(239,68,68,0.12);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
     }
 
     .card:hover {
       transform: translateY(-3px);
     }
 
-    .card.normal { border-left-color: var(--green); }
-    .card.warning { border-left-color: var(--warning); }
-    .card.fault { border-left-color: var(--red); }
-    .card.offline { border-left-color: #555; opacity: 0.7; }
+    .card.normal {
+      border-left-color: var(--green);
+    }
+
+    .card.warning {
+      border-left-color: var(--warning);
+      box-shadow: 0 8px 20px rgba(245,158,11,0.12);
+    }
+
+    .card.fault {
+      border-left-color: var(--red);
+      border-top-color: rgba(239,68,68,0.35);
+      box-shadow: 0 0 18px rgba(239,68,68,0.28);
+    }
+
+    .card.offline {
+      border-left-color: var(--offline);
+    }
 
     .title {
       display: flex;
       justify-content: space-between;
-      align-items: center;
       margin-bottom: 10px;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .title-text {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
     }
 
     .title-main {
-      font-weight: bold;
       font-size: 1.1rem;
+      font-weight: bold;
+    }
+
+    .title-sub {
+      color: var(--muted);
+      font-size: 0.82rem;
     }
 
     .badge {
       padding: 4px 10px;
       border-radius: 20px;
       font-size: 0.75rem;
+      color: white;
       font-weight: bold;
-      color: #fff;
+      white-space: nowrap;
     }
 
     .badge.normal { background: var(--green); }
-    .badge.warning { background: var(--warning); }
+    .badge.warning { background: var(--warning); color: #1a1200; }
     .badge.fault { background: var(--red); }
-    .badge.offline { background: #666; }
+    .badge.offline { background: var(--offline); }
 
     .section {
       margin-top: 14px;
-      border-top: 1px solid var(--border);
-      padding-top: 10px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .section-title {
+      margin: 0 0 10px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      font-weight: bold;
+      letter-spacing: 0.3px;
     }
 
     .row {
       display: flex;
       justify-content: space-between;
       margin: 6px 0;
-      font-size: 0.92rem;
+      gap: 12px;
     }
 
-    .label { color: var(--muted); }
-    .value { font-weight: bold; }
+    .label {
+      color: var(--muted);
+    }
+
+    .value {
+      font-weight: bold;
+    }
+
+    .graph-wrap {
+      margin-top: 10px;
+      padding: 10px;
+      background: var(--graph-bg);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 10px;
+    }
+
+    .graph-title {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 120px;
+      display: block;
+      background: transparent;
+    }
+
+    .config-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .small {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
 
     input, select {
       width: 100%;
       padding: 6px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
       background: #081f18;
       color: white;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--red);
+      box-shadow: 0 0 0 2px rgba(239,68,68,0.14);
+    }
+
+    .full {
+      grid-column: span 2;
     }
 
     button {
       width: 100%;
-      padding: 8px;
       margin-top: 8px;
-      border-radius: 8px;
+      padding: 8px;
       border: none;
-      background: var(--green);
+      border-radius: 8px;
+      background: linear-gradient(90deg, var(--green-dark), var(--green));
       color: white;
       font-weight: bold;
       cursor: pointer;
     }
 
     button:hover {
-      background: #0c6e49;
+      filter: brightness(1.05);
+    }
+
+    .fault button {
+      background: linear-gradient(90deg, var(--red-dark), var(--red));
     }
   </style>
 </head>
@@ -273,7 +374,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
 <div class="topbar">
   <div class="brand">
-    <img src="/logo.png">
+    <img src="/logo.png" alt="Grande Cheese Company Logo">
     <h1>Motor Vibration Monitor</h1>
   </div>
   <div class="meta" id="gatewayMeta">Connecting...</div>
@@ -285,6 +386,34 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 const nodeGrid = document.getElementById("nodeGrid");
 const gatewayMeta = document.getElementById("gatewayMeta");
 
+const trendHistory = {};
+const piezoHistory = {};
+const MAX_HISTORY = 40;
+const editingState = {};
+
+function isEditing(addr) {
+  return editingState[addr] === true;
+}
+
+function attachEditListeners(addr) {
+  const w = document.getElementById(`w${addr}`);
+  const f = document.getElementById(`f${addr}`);
+
+  [w, f].forEach(input => {
+    if (!input) return;
+
+    input.addEventListener("focus", () => {
+      editingState[addr] = true;
+    });
+
+    input.addEventListener("blur", () => {
+      setTimeout(() => {
+        editingState[addr] = false;
+      }, 300);
+    });
+  });
+}
+
 function statusClass(node) {
   if (!node.online) return "offline";
   if (node.status === 0) return "normal";
@@ -293,41 +422,12 @@ function statusClass(node) {
   return "offline";
 }
 
-function renderGatewayMeta(payload) {
-  gatewayMeta.innerHTML =
-    `IP: ${payload.gateway_ip} | Online: ${payload.online_nodes}/${payload.node_count}`;
-}
-
-function renderNodes(payload) {
-  nodeGrid.innerHTML = "";
-
-  payload.nodes.forEach(node => {
-    const cls = statusClass(node);
-
-    const card = document.createElement("div");
-    card.className = `card ${cls}`;
-
-    card.innerHTML = `
-      <div class="title">
-        <span class="title-main">${node.display_name}</span>
-        <span class="badge ${cls}">${node.status}</span>
-      </div>
-
-      <div class="section">
-        <div class="row"><span class="label">BDU</span><span class="value">${(node.bdu_x10/10).toFixed(1)}</span></div>
-        <div class="row"><span class="label">RMS</span><span class="value">${(node.overall_rms_mg/1000).toFixed(3)} g</span></div>
-        <div class="row"><span class="label">Age</span><span class="value">${(node.age_ms/1000).toFixed(1)} s</span></div>
-      </div>
-
-      <div class="section">
-        <div class="row"><span class="label">Warn BDU</span><input id="w${node.slave_address}" value="${(node.warning_bdu_x10/10).toFixed(1)}"></div>
-        <div class="row"><span class="label">Fault BDU</span><input id="f${node.slave_address}" value="${(node.fault_bdu_x10/10).toFixed(1)}"></div>
-        <button onclick="send(${node.slave_address})">Apply</button>
-      </div>
-    `;
-
-    nodeGrid.appendChild(card);
-  });
+function statusText(node) {
+  if (!node.online) return "OFFLINE";
+  if (node.status === 0) return "NORMAL";
+  if (node.status === 1) return "WARNING";
+  if (node.status === 2) return "FAULT";
+  return "UNKNOWN";
 }
 
 async function send(addr) {
@@ -343,14 +443,209 @@ async function send(addr) {
   alert("Updated");
 }
 
+function renderGatewayMeta(payload) {
+  gatewayMeta.innerHTML =
+    `IP: ${payload.gateway_ip} | Online: ${payload.online_nodes}/${payload.node_count}`;
+}
+
+function updateTrendHistory(payload) {
+  payload.nodes.forEach(node => {
+    const addr = node.slave_address;
+    const bdu = node.bdu_x10 / 10.0;
+    const piezo = node.piezo_level;
+
+    if (!trendHistory[addr]) trendHistory[addr] = [];
+    if (!piezoHistory[addr]) piezoHistory[addr] = [];
+
+    trendHistory[addr].push(bdu);
+    piezoHistory[addr].push(piezo);
+
+    if (trendHistory[addr].length > MAX_HISTORY) trendHistory[addr].shift();
+    if (piezoHistory[addr].length > MAX_HISTORY) piezoHistory[addr].shift();
+  });
+}
+
+function drawTrend(canvasId, data, nodeClass, warn, fault) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+
+  const parentWidth = canvas.parentElement.clientWidth - 20;
+  canvas.width = parentWidth > 50 ? parentWidth : 300;
+  canvas.height = 120;
+
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = (h / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  if (!data || data.length < 2) return;
+
+  const maxVal = Math.max(...data, fault || 1);
+  const minVal = Math.min(...data, 0);
+  const range = Math.max(maxVal - minVal, 0.5);
+
+  function scaleY(v) {
+    return h - ((v - minVal) / range) * (h - 10) - 5;
+  }
+
+  if (warn !== undefined) {
+    ctx.strokeStyle = "#f59e0b";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, scaleY(warn));
+    ctx.lineTo(w, scaleY(warn));
+    ctx.stroke();
+  }
+
+  if (fault !== undefined) {
+    ctx.strokeStyle = "#ef4444";
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, scaleY(fault));
+    ctx.lineTo(w, scaleY(fault));
+    ctx.stroke();
+  }
+
+  ctx.setLineDash([]);
+
+  let strokeColor = "#0aa064";
+  if (nodeClass === "warning") strokeColor = "#f59e0b";
+  if (nodeClass === "fault") strokeColor = "#ef4444";
+  if (nodeClass === "offline") strokeColor = "#64748b";
+
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+
+  data.forEach((v, i) => {
+    const x = (i / (data.length - 1)) * (w - 1);
+    const y = scaleY(v);
+
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+
+  ctx.stroke();
+
+  const lastVal = data[data.length - 1];
+  const lastX = w - 1;
+  const lastY = scaleY(lastVal);
+
+  ctx.fillStyle = strokeColor;
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function renderNodes(payload) {
+  const currentlyEditing = Object.values(editingState).some(v => v === true);
+  if (currentlyEditing) {
+    return;
+  }
+
+  nodeGrid.innerHTML = "";
+
+  payload.nodes.forEach(node => {
+    const cls = statusClass(node);
+    const status = statusText(node);
+    const canvasId = `trend_${node.slave_address}`;
+
+    const card = document.createElement("div");
+    card.className = `card ${cls}`;
+
+    card.innerHTML = `
+      <div class="title">
+        <div class="title-text">
+          <div class="title-main">${node.display_name}</div>
+          <div class="title-sub">Slave ${node.slave_address}</div>
+        </div>
+        <span class="badge ${cls}">${status}</span>
+      </div>
+
+      <div class="row"><span class="label">BDU</span><span class="value">${(node.bdu_x10/10).toFixed(1)}</span></div>
+      <div class="row"><span class="label">RMS</span><span class="value">${(node.overall_rms_mg/1000).toFixed(3)} g</span></div>
+      <div class="row"><span class="label">Age</span><span class="value">${(node.age_ms/1000).toFixed(1)} s</span></div>
+      <div class="row"><span class="label">Piezo</span><span class="value">${node.piezo_level}</span></div>
+
+      <div class="section">
+        <div class="section-title">BDU Trend</div>
+        <div class="graph-wrap">
+          <div class="graph-title">Recent live trend</div>
+          <canvas id="trend_${node.slave_address}"></canvas>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Piezo Trend</div>
+        <div class="graph-wrap">
+          <div class="graph-title">Recent live trend</div>
+          <canvas id="piezo_${node.slave_address}"></canvas>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Configuration</div>
+        <div class="config-grid">
+          <div>
+            <div class="small">Warn BDU</div>
+            <input id="w${node.slave_address}" value="${(node.warning_bdu_x10/10).toFixed(1)}">
+          </div>
+          <div>
+            <div class="small">Fault BDU</div>
+            <input id="f${node.slave_address}" value="${(node.fault_bdu_x10/10).toFixed(1)}">
+          </div>
+          <div class="full">
+            <button onclick="send(${node.slave_address})">Apply</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    nodeGrid.appendChild(card);
+    attachEditListeners(node.slave_address);
+
+    drawTrend(
+      `trend_${node.slave_address}`,
+      trendHistory[node.slave_address] || [],
+      cls,
+      node.warning_bdu_x10 / 10,
+      node.fault_bdu_x10 / 10
+    );
+
+    drawTrend(
+      `piezo_${node.slave_address}`,
+      piezoHistory[node.slave_address] || [],
+      cls
+    );
+  });
+}
+
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onmessage = (e)=>{
+
+  ws.onmessage = (e) => {
     const data = JSON.parse(e.data);
     renderGatewayMeta(data);
+    updateTrendHistory(data);
     renderNodes(data);
   };
+
+  ws.onclose = () => {
+    setTimeout(connect, 2000);
+  };
 }
+
 connect();
 </script>
 
@@ -772,7 +1067,26 @@ void setup()
         Serial.println("SPIFFS Mount Failed");
         return;
     }
+    Serial.println("SPIFFS mounted successfully.");
 
+    if (SPIFFS.exists("/logo.png"))
+    {
+        Serial.println("logo.png found in SPIFFS");
+    }
+    else
+    {
+        Serial.println("logo.png NOT found in SPIFFS");
+    }
+    File root = SPIFFS.open("/");
+    File file = root.openNextFile();
+
+    Serial.println("SPIFFS file list:");
+    while (file)
+    {
+        Serial.print(" - ");
+        Serial.println(file.name());
+        file = root.openNextFile();
+    }
     pinMode(PIN_RS485_EN, OUTPUT);
     digitalWrite(PIN_RS485_EN, LOW);
 
