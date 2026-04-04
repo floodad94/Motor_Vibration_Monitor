@@ -27,7 +27,6 @@ static constexpr int PIN_RS485_EN = 18;
 
 // ============================================================
 // MODBUS REGISTER OFFSETS
-// Must match sensor node firmware.
 // ============================================================
 enum InputRegisterOffset : uint16_t
 {
@@ -44,6 +43,17 @@ enum InputRegisterOffset : uint16_t
     IR_ERROR_FLAGS,
     IR_UPTIME_SECONDS_LO,
     IR_COUNT
+};
+
+enum HoldingRegisterOffset : uint16_t
+{
+    HR_WARNING_BDU_X10 = 0,
+    HR_FAULT_BDU_X10,
+    HR_PIEZO_WARN_THRESHOLD,
+    HR_PIEZO_FAULT_THRESHOLD,
+    HR_LED_ENABLE,
+    HR_RESERVED_1,
+    HR_COUNT
 };
 
 // ============================================================
@@ -75,12 +85,27 @@ struct NodeTelemetry
     bool online;
     uint32_t last_poll_ms;
     uint8_t slave_address;
+
+    // cached config shown on dashboard / last requested values
+    uint16_t warning_bdu_x10;
+    uint16_t fault_bdu_x10;
+    uint16_t piezo_warn_threshold;
+    uint16_t piezo_fault_threshold;
+    uint16_t led_enable;
+};
+
+struct PendingWriteJob
+{
+    bool active;
+    uint8_t slave_address;
+    uint16_t values[HR_COUNT];
 };
 
 NodeTelemetry nodes[NODE_COUNT];
 uint16_t nodeReadBuffer[IR_COUNT] = {0};
+PendingWriteJob pendingWrite = {false, 0, {0}};
 
-// Polling state
+// Polling / write state
 uint32_t lastPollMs = 0;
 uint32_t lastPrintMs = 0;
 uint32_t lastWsBroadcastMs = 0;
@@ -114,7 +139,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 16px;
       margin-top: 20px;
     }
@@ -127,22 +152,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       border-left: 8px solid #475569;
     }
 
-    .card.normal {
-      border-left-color: #22c55e;
-    }
-
-    .card.warning {
-      border-left-color: #f59e0b;
-    }
-
-    .card.fault {
-      border-left-color: #ef4444;
-    }
-
-    .card.offline {
-      border-left-color: #64748b;
-      opacity: 0.8;
-    }
+    .card.normal { border-left-color: #22c55e; }
+    .card.warning { border-left-color: #f59e0b; }
+    .card.fault { border-left-color: #ef4444; }
+    .card.offline { border-left-color: #64748b; opacity: 0.8; }
 
     .title {
       display: flex;
@@ -172,6 +185,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       justify-content: space-between;
       margin: 6px 0;
       font-size: 0.95rem;
+      gap: 12px;
     }
 
     .label {
@@ -195,14 +209,61 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       color: #cbd5e1;
       font-size: 0.95rem;
     }
+
+    .config {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid #334155;
+    }
+
+    .config h3 {
+      margin: 0 0 10px 0;
+      font-size: 1rem;
+    }
+
+    .config-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    input, select, button {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #475569;
+      background: #0f172a;
+      color: #f8fafc;
+    }
+
+    button {
+      background: #2563eb;
+      border: none;
+      cursor: pointer;
+      font-weight: bold;
+      margin-top: 8px;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    .full {
+      grid-column: span 2;
+    }
+
+    .small {
+      font-size: 0.82rem;
+      color: #cbd5e1;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
   <div class="topbar">
     <h1>Motor Vibration Monitor</h1>
-    <div class="meta">
-      Gateway WebSocket Dashboard
-    </div>
+    <div class="meta">Gateway Dashboard + Remote Configuration</div>
   </div>
 
   <div class="grid" id="nodeGrid"></div>
@@ -224,6 +285,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       if (node.status === 1) return "WARNING";
       if (node.status === 2) return "FAULT";
       return "UNKNOWN";
+    }
+
+    async function submitConfig(slaveAddress) {
+      const warnBdu = document.getElementById(`warn_bdu_${slaveAddress}`).value;
+      const faultBdu = document.getElementById(`fault_bdu_${slaveAddress}`).value;
+      const piezoWarn = document.getElementById(`piezo_warn_${slaveAddress}`).value;
+      const piezoFault = document.getElementById(`piezo_fault_${slaveAddress}`).value;
+      const ledEnable = document.getElementById(`led_enable_${slaveAddress}`).value;
+
+      const body = new URLSearchParams();
+      body.append("slave_address", slaveAddress);
+      body.append("warning_bdu", warnBdu);
+      body.append("fault_bdu", faultBdu);
+      body.append("piezo_warning", piezoWarn);
+      body.append("piezo_fault", piezoFault);
+      body.append("led_enable", ledEnable);
+
+      const response = await fetch("/set-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      });
+
+      const text = await response.text();
+      alert(text);
     }
 
     function renderNodes(payload) {
@@ -254,6 +340,38 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           <div class="row"><span class="label">Spike Count</span><span class="value">${node.spike_count_lo}</span></div>
           <div class="row"><span class="label">Error Flags</span><span class="value">0x${Number(node.error_flags).toString(16).padStart(4,"0")}</span></div>
           <div class="row"><span class="label">Uptime</span><span class="value">${node.uptime_seconds_lo} s</span></div>
+
+          <div class="config">
+            <h3>Threshold Configuration</h3>
+            <div class="config-grid">
+              <div>
+                <div class="small">Warning BDU</div>
+                <input id="warn_bdu_${node.slave_address}" type="number" step="0.1" value="${(node.warning_bdu_x10 / 10).toFixed(1)}">
+              </div>
+              <div>
+                <div class="small">Fault BDU</div>
+                <input id="fault_bdu_${node.slave_address}" type="number" step="0.1" value="${(node.fault_bdu_x10 / 10).toFixed(1)}">
+              </div>
+              <div>
+                <div class="small">Piezo Warning</div>
+                <input id="piezo_warn_${node.slave_address}" type="number" step="1" value="${node.piezo_warn_threshold}">
+              </div>
+              <div>
+                <div class="small">Piezo Fault</div>
+                <input id="piezo_fault_${node.slave_address}" type="number" step="1" value="${node.piezo_fault_threshold}">
+              </div>
+              <div class="full">
+                <div class="small">LED Enable</div>
+                <select id="led_enable_${node.slave_address}">
+                  <option value="1" ${node.led_enable ? "selected" : ""}>Enabled</option>
+                  <option value="0" ${!node.led_enable ? "selected" : ""}>Disabled</option>
+                </select>
+              </div>
+              <div class="full">
+                <button onclick="submitConfig(${node.slave_address})">Apply to Node ${index + 1}</button>
+              </div>
+            </div>
+          </div>
         `;
 
         nodeGrid.appendChild(card);
@@ -316,6 +434,12 @@ void initializeNodeTable()
         nodes[i].online = false;
         nodes[i].last_poll_ms = 0;
         nodes[i].slave_address = FIRST_NODE_ADDRESS + i;
+
+        nodes[i].warning_bdu_x10 = 150;
+        nodes[i].fault_bdu_x10 = 300;
+        nodes[i].piezo_warn_threshold = 1200;
+        nodes[i].piezo_fault_threshold = 2200;
+        nodes[i].led_enable = 1;
     }
 }
 
@@ -364,9 +488,30 @@ bool cbRead(Modbus::ResultCode event, uint16_t transactionId, void *data)
     return true;
 }
 
+bool cbWrite(Modbus::ResultCode event, uint16_t transactionId, void *data)
+{
+    (void)transactionId;
+    (void)data;
+
+    modbusBusy = false;
+
+    if (event == Modbus::EX_SUCCESS)
+    {
+        Serial.printf("[Gateway] Config write success for slave %u\n", pendingWrite.slave_address);
+    }
+    else
+    {
+        Serial.printf("[Gateway] Config write failed for slave %u, result code: %d\n",
+                      pendingWrite.slave_address, event);
+    }
+
+    pendingWrite.active = false;
+    return true;
+}
+
 void startNextPoll()
 {
-    if (modbusBusy)
+    if (modbusBusy || pendingWrite.active)
     {
         return;
     }
@@ -394,6 +539,30 @@ void startNextPoll()
     if (currentPollIndex >= NODE_COUNT)
     {
         currentPollIndex = 0;
+    }
+}
+
+void processPendingWrite()
+{
+    if (!pendingWrite.active || modbusBusy)
+    {
+        return;
+    }
+
+    modbusBusy = true;
+
+    bool started = mb.writeHreg(
+        pendingWrite.slave_address,
+        0,
+        pendingWrite.values,
+        HR_COUNT,
+        cbWrite);
+
+    if (!started)
+    {
+        modbusBusy = false;
+        Serial.printf("[Gateway] Failed to start config write for slave %u\n", pendingWrite.slave_address);
+        pendingWrite.active = false;
     }
 }
 
@@ -439,6 +608,11 @@ String buildNodesJson()
         json += "\"spike_count_lo\":" + String(nodes[i].spike_count_lo) + ",";
         json += "\"error_flags\":" + String(nodes[i].error_flags) + ",";
         json += "\"uptime_seconds_lo\":" + String(nodes[i].uptime_seconds_lo) + ",";
+        json += "\"warning_bdu_x10\":" + String(nodes[i].warning_bdu_x10) + ",";
+        json += "\"fault_bdu_x10\":" + String(nodes[i].fault_bdu_x10) + ",";
+        json += "\"piezo_warn_threshold\":" + String(nodes[i].piezo_warn_threshold) + ",";
+        json += "\"piezo_fault_threshold\":" + String(nodes[i].piezo_fault_threshold) + ",";
+        json += "\"led_enable\":" + String(nodes[i].led_enable) + ",";
         json += "\"online\":" + String(nodes[i].online ? "true" : "false");
         json += "}";
     }
@@ -449,8 +623,7 @@ String buildNodesJson()
 
 void broadcastNodeData()
 {
-    String payload = buildNodesJson();
-    ws.textAll(payload);
+    ws.textAll(buildNodesJson());
 }
 
 void connectWiFi()
@@ -501,6 +674,61 @@ void setupWebServer()
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
               { request->send_P(200, "text/html", INDEX_HTML); });
 
+    server.on("/set-config", HTTP_POST, [](AsyncWebServerRequest *request)
+              {
+        if (!request->hasParam("slave_address", true) ||
+            !request->hasParam("warning_bdu", true) ||
+            !request->hasParam("fault_bdu", true) ||
+            !request->hasParam("piezo_warning", true) ||
+            !request->hasParam("piezo_fault", true) ||
+            !request->hasParam("led_enable", true)) {
+            request->send(400, "text/plain", "Missing parameters");
+            return;
+        }
+
+        uint8_t slaveAddress = static_cast<uint8_t>(request->getParam("slave_address", true)->value().toInt());
+        float warningBdu = request->getParam("warning_bdu", true)->value().toFloat();
+        float faultBdu = request->getParam("fault_bdu", true)->value().toFloat();
+        uint16_t piezoWarn = static_cast<uint16_t>(request->getParam("piezo_warning", true)->value().toInt());
+        uint16_t piezoFault = static_cast<uint16_t>(request->getParam("piezo_fault", true)->value().toInt());
+        uint16_t ledEnable = static_cast<uint16_t>(request->getParam("led_enable", true)->value().toInt());
+
+        if (slaveAddress < FIRST_NODE_ADDRESS || slaveAddress >= FIRST_NODE_ADDRESS + NODE_COUNT) {
+            request->send(400, "text/plain", "Invalid slave address");
+            return;
+        }
+
+        if (faultBdu < warningBdu) {
+            faultBdu = warningBdu;
+        }
+
+        if (piezoFault < piezoWarn) {
+            piezoFault = piezoWarn;
+        }
+
+        if (pendingWrite.active || modbusBusy) {
+            request->send(409, "text/plain", "Gateway busy, try again");
+            return;
+        }
+
+        pendingWrite.active = true;
+        pendingWrite.slave_address = slaveAddress;
+        pendingWrite.values[HR_WARNING_BDU_X10] = static_cast<uint16_t>(warningBdu * 10.0f);
+        pendingWrite.values[HR_FAULT_BDU_X10] = static_cast<uint16_t>(faultBdu * 10.0f);
+        pendingWrite.values[HR_PIEZO_WARN_THRESHOLD] = piezoWarn;
+        pendingWrite.values[HR_PIEZO_FAULT_THRESHOLD] = piezoFault;
+        pendingWrite.values[HR_LED_ENABLE] = ledEnable ? 1 : 0;
+        pendingWrite.values[HR_RESERVED_1] = 0;
+
+        uint8_t nodeIndex = slaveAddress - FIRST_NODE_ADDRESS;
+        nodes[nodeIndex].warning_bdu_x10 = pendingWrite.values[HR_WARNING_BDU_X10];
+        nodes[nodeIndex].fault_bdu_x10 = pendingWrite.values[HR_FAULT_BDU_X10];
+        nodes[nodeIndex].piezo_warn_threshold = pendingWrite.values[HR_PIEZO_WARN_THRESHOLD];
+        nodes[nodeIndex].piezo_fault_threshold = pendingWrite.values[HR_PIEZO_FAULT_THRESHOLD];
+        nodes[nodeIndex].led_enable = pendingWrite.values[HR_LED_ENABLE];
+
+        request->send(200, "text/plain", "Configuration queued for write"); });
+
     server.begin();
     Serial.println("Web server started.");
 }
@@ -515,7 +743,7 @@ void setup()
 
     Serial.println();
     Serial.println("Motor Vibration Monitor - Gateway Boot");
-    Serial.println("Commit 8: WebSocket dashboard for five nodes");
+    Serial.println("Commit 9: remote threshold configuration over Modbus");
 
     pinMode(PIN_RS485_EN, OUTPUT);
     digitalWrite(PIN_RS485_EN, LOW);
@@ -540,6 +768,8 @@ void loop()
 
     mb.task();
     ws.cleanupClients();
+
+    processPendingWrite();
 
     if (now - lastPollMs >= POLL_INTERVAL_MS)
     {
